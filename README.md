@@ -11,6 +11,10 @@ billing export. CloudLeak works out which cloud it came from, normalizes it into
 single internal schema, finds spend going to resources nothing is using, and
 generates the cleanup commands — for you to review and run yourself.
 
+![CloudLeak dashboard](screenshot.png)
+
+![Findings by rule](findings.png)
+
 ---
 
 ## What it finds
