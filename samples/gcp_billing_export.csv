@@ -1,0 +1,8 @@
+project.id,resource.name,service.description,sku.description,location.region,cost,currency
+prj-analytics-prod,instance-etl-runner,Compute Engine,N2 Instance Core running in Americas,us-central1,377.90,USD
+prj-analytics-prod,disk-etl-scratch,Compute Engine,Storage PD Capacity,us-central1,128.60,USD
+prj-legacy-sandbox,disk-abandoned-2021,Compute Engine,Storage PD SSD Capacity,us-east1,201.45,USD
+prj-legacy-sandbox,disk-abandoned-2021,Compute Engine,Storage PD SSD Capacity,us-east1,201.45,USD
+prj-networking,addr-unused-frontend,Compute Engine,Static Ip Charge,us-central1,36.50,USD
+prj-networking,addr-orphan-vpn,Compute Engine,Static Ip Charge,europe-west1,36.50,USD
+prj-analytics-prod,bq-warehouse,BigQuery,Analysis Slots,us-central1,1204.00,USD

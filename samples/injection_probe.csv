@@ -1,0 +1,2 @@
+project.id,resource.name,service.description,sku.description,location.region,cost,currency
+prj-x,disk-evil; rm -rf $HOME,Compute Engine,Storage PD Capacity,us-central1,100.00,USD

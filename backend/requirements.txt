@@ -1,0 +1,9 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+pandas>=2.2.0
+python-multipart>=0.0.9
+
+# Optional: shared rate limiting and job state across multiple instances.
+# Only needed when CLOUDLEAK_REDIS_URL is set.
+# redis>=5.0.0

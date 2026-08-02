@@ -1,0 +1,11 @@
+SubscriptionId,ResourceGroup,ResourceId,MeterCategory,MeterSubCategory,ResourceLocation,CostInBillingCurrency,BillingCurrency
+sub-001,rg-prod-web,vm-web-01,Virtual Machines,Dv3/DSv3 Series,eastus,412.55,USD
+sub-001,rg-prod-web,disk-web-01-os,Storage,Premium SSD Managed Disks,eastus,38.20,USD
+sub-001,rg-legacy-2019,disk-orphan-analytics,Storage,Premium SSD Managed Disks,eastus,164.90,USD
+sub-001,rg-legacy-2019,disk-orphan-analytics,Storage,Premium SSD Managed Disks,eastus,164.90,USD
+sub-001,rg-legacy-2019,disk-orphan-backup-old,Storage,Standard HDD Managed Disks,westus2,72.10,USD
+sub-001,rg-networking,pip-loadbalancer-dead,Virtual Network,IP Addresses,eastus,88.40,USD
+sub-001,rg-networking,pip-bastion-unused,Virtual Network,Public IP Addresses,westus2,44.20,USD
+sub-001,,orphaned-snapshot-store,Storage,Standard Page Blob,eastus,29.75,USD
+sub-001,rg-prod-web,sqldb-primary,SQL Database,Single Standard,eastus,655.00,USD
+sub-001,rg-data,storage-datalake,Storage,General Block Blob,eastus,240.15,USD

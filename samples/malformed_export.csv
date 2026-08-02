@@ -1,0 +1,4 @@
+project.id,resource.name,service.description,sku.description,location.region,cost,currency
+prj-a,disk-broken,Compute Engine,Storage PD Capacity,us-central1,not-a-number,USD
+prj-a,,Compute Engine,Storage PD Capacity,us-central1,,USD
+prj-a,disk-fine,Compute Engine,Storage PD Capacity,us-central1,"1,250.00",USD

@@ -1,0 +1,151 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --concrete: #dfe3e0;
+  --panel: #f2f4f1;
+  --ink: #12191c;
+  --graphite: #4a565a;
+  --hairline: #c3c9c4;
+  --verdigris: #2e6b5e;
+  --rust: #b4402a;
+}
+
+html,
+body {
+  background-color: var(--concrete);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Fine measurement grid, like graph paper under a datasheet. Sits behind
+   everything at very low contrast so it reads as texture, not decoration. */
+.measure-grid {
+  background-image: linear-gradient(to right, rgba(18, 25, 28, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(18, 25, 28, 0.05) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* Ruled tick strip used as a section divider. Encodes the metering motif
+   without adding another color. */
+.tick-rule {
+  height: 10px;
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--hairline) 0 1px,
+    transparent 1px 12px
+  );
+  border-bottom: 1px solid var(--hairline);
+}
+
+.eyebrow {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Gauge fill animation. One orchestrated moment on report load. */
+@keyframes gauge-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.gauge-fill {
+  transform-origin: left center;
+  animation: gauge-fill 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes drip {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  25% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(14px);
+    opacity: 0;
+  }
+}
+
+.drip {
+  animation: drip 2.4s ease-in infinite;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--verdigris);
+  outline-offset: 2px;
+}
+
+/* Print / PDF export.
+   Browsers drop background colours when printing, which silently erases the
+   gauge fill and every panel tint -- the report emailed to a stakeholder would
+   show an empty meter. print-color-adjust forces them to render. */
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* The fill is animated in; a print snapshot can catch it mid-transform. */
+  .gauge-fill {
+    animation: none !important;
+    transform: none !important;
+  }
+
+  .drip {
+    display: none !important;
+  }
+
+  /* Only drop the grid texture -- this class sits on <main>, so hiding the
+     element itself would blank the entire report. */
+  .measure-grid {
+    background-image: none !important;
+  }
+
+  /* Keep each panel and the findings table intact across a page break. */
+  section,
+  table {
+    break-inside: avoid;
+  }
+
+  /* Scrolling regions must expand: a clipped overflow hides commands entirely. */
+  .overflow-y-auto,
+  .max-h-64,
+  ol.max-h-\[26rem\] {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* Interactive controls mean nothing on paper. */
+  button {
+    display: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

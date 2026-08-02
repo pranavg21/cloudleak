@@ -1,0 +1,9 @@
+BilledCost,EffectiveCost,ContractedCost,ServiceCategory,ServiceSubcategory,ChargeCategory,ChargeClass,SubAccountName,ResourceId,RegionId,BillingCurrency,InvoiceId,BillingPeriodStart,CommitmentDiscountQuantity
+512.55,500.00,480.00,Compute,Virtual Machines,Usage,,proj-prod,vm-app-01,us-east-1,USD,INV-2026-07,2026-07-01,0
+288.30,280.00,270.00,Storage,Managed Disks,Usage,,proj-legacy,disk-stale-01,us-east-1,USD,INV-2026-07,2026-07-01,0
+199.10,195.00,190.00,Storage,Managed Disks,Usage,,proj-legacy,disk-stale-02,us-west-2,USD,INV-2026-07,2026-07-01,0
+76.40,75.00,74.00,Networking,Public IP Addresses,Usage,,proj-net,ip-idle-01,us-east-1,USD,INV-2026-07,2026-07-01,0
+95.00,93.00,90.00,Storage,Snapshots,Usage,,proj-backup,snap-2025-archive,us-east-1,USD,INV-2026-07,2026-07-01,0
+310.00,305.00,300.00,Networking,Load Balancer,Usage,,proj-prod,lb-unused-01,us-east-1,USD,INV-2026-07,2026-07-01,0
+921.00,900.00,880.00,Databases,SQL Database,Usage,,proj-prod,db-main,us-east-1,USD,INV-2026-07,2026-07-01,0
+210.00,210.00,210.00,Other,Tax,Tax,,proj-prod,,us-east-1,USD,INV-2026-07,2026-07-01,0

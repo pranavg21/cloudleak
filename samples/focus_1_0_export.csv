@@ -1,0 +1,10 @@
+BilledCost,EffectiveCost,ServiceCategory,ServiceName,ChargeCategory,SubAccountName,ResourceId,ResourceName,RegionId,BillingCurrency,ChargePeriodStart
+412.55,400.00,Compute,Virtual Machines,Usage,rg-prod,vm-web-01,eastus,USD,2026-07-01
+329.80,320.00,Storage,Managed Disks,Usage,rg-legacy,disk-orphan-01,eastus,USD,2026-07-01
+164.90,160.00,Storage,Managed Disks,Usage,rg-legacy,disk-orphan-02,westus2,USD,2026-07-01
+88.40,85.00,Networking,IP Addresses,Usage,rg-net,pip-dead-01,eastus,USD,2026-07-01
+44.20,42.00,Networking,IP Addresses,Usage,rg-net,pip-dead-02,westus2,USD,2026-07-01
+120.00,118.00,Storage,Snapshots,Usage,rg-backup,snap-old-2024,eastus,USD,2026-07-01
+655.00,640.00,Databases,SQL Database,Usage,rg-prod,sqldb-primary,eastus,USD,2026-07-01
+187.45,187.45,Other,Tax,Tax,rg-prod,,eastus,USD,2026-07-01
+-55.00,-55.00,Storage,Managed Disks,Credit,rg-legacy,,eastus,USD,2026-07-01
