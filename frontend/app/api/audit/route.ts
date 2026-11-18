@@ -25,7 +25,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
+  const chunks: BlobPart[] = [];
   let total = 0;
   try {
     while (true) {
@@ -36,7 +36,7 @@ export async function POST(request: Request): Promise<Response> {
         await reader.cancel();
         return Response.json({ detail: "Upload exceeds the 20 MB limit." }, { status: 413 });
       }
-      chunks.push(value);
+      chunks.push(new Uint8Array(value).buffer as ArrayBuffer);
     }
   } catch {
     return Response.json({ detail: "Could not read the uploaded file." }, { status: 400 });
