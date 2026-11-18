@@ -128,7 +128,7 @@ def test_job_completes_and_carries_the_report(client):
     body = poll(client, job_id).json()
     assert body["status"] == "succeeded"
     assert body["report"]["detected_provider"] == "GCP"
-    assert body["report"]["metrics"]["identified_waste"] > 0
+    assert body["report"]["metrics"]["review_spend"] > 0
     assert body["duration_ms"] is not None
 
 
