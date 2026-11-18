@@ -45,6 +45,15 @@ CSV -> Next.js upload route -> FastAPI queue -> pandas normalization
        -> provider-specific rule matches -> structured report -> dashboard
 ```
 
+**Local demonstration only:** The Next.js proxy is intentionally disabled when
+`NODE_ENV=production`. It authenticates to FastAPI with one shared server-side
+key, not individual user identities. Never publish that proxy without adding
+proper user authentication, authorization, CSRF protection, and per-user quotas.
+The local dev server binds to `127.0.0.1`. The frontend caps raw multipart
+requests at 21 MiB (including form overhead), and the backend caps the CSV
+payload at 20 MiB by default. These limits are configuration-dependent and
+not substitutes for upstream reverse-proxy limits.
+
 The parser rejects invalid cost values (and counts rejected rows), detects
 mixed billing currencies before adding costs, and separates usage from tax,
 credits and fees when charge-category fields are available. Costs refer to
@@ -83,12 +92,13 @@ performed.
   are held in process memory until their TTL expires. The browser stores a
   report in session storage. These properties are not guarantees of zero
   disk use or end-to-end secure deletion.
-- The Next.js API proxy uses a server-side shared backend key; it has **no
-  per-user authentication**. Do not publicly expose it as a multi-user service
-  without adding identity, access controls and upload quotas.
+- The Next.js API proxy uses one shared backend key and has **no per-user
+  authentication**. Production proxy routes return HTTP 503 by design; public
+  deployment requires proper identity, access controls and upload quotas.
 - Per-key rate limiting and the job queue run in-process by default. The
-  timeout bounds how long the worker awaits an audit; it does not forcibly
-  stop an executor thread that is already running.
+  queue limits the combined in-flight upload bytes. A timed-out executor thread
+  cannot be forcibly stopped: its worker remains occupied until parsing exits.
+  Redis can share rate-limit state, but does not make job state shared.
 - No destructive remediation commands are generated or executed.
 
 Environment options are documented in `backend/.env.example`. Backend key
