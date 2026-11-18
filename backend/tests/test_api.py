@@ -267,3 +267,53 @@ def test_settings_flag_unsafe_production_config():
     ).production_warnings()
     assert any("API_KEY_HASHES" in problem for problem in problems)
     assert any("wildcard" in problem for problem in problems)
+
+
+def test_queue_rejects_total_reserved_upload_bytes():
+    from services.job_queue import QueueMemoryLimitError
+
+    async def scenario():
+        queue = AuditQueue(worker_count=0, max_size=5, max_bytes_in_flight=len(GOOD_CSV) + 1)
+        await queue.submit("one", "one.csv", GOOD_CSV)
+        with pytest.raises(QueueMemoryLimitError):
+            await queue.submit("two", "two.csv", GOOD_CSV)
+        assert queue._reserved_bytes == len(GOOD_CSV)
+
+    asyncio.run(scenario())
+
+
+def test_queue_releases_memory_after_processing():
+    async def scenario():
+        queue = AuditQueue(worker_count=1, max_size=3)
+        await queue.start()
+        try:
+            job = await queue.submit("key", "audit.csv", GOOD_CSV)
+            for _ in range(100):
+                if job.is_terminal and queue._reserved_bytes == 0:
+                    break
+                await asyncio.sleep(0.03)
+            assert job.status is JobStatus.SUCCEEDED
+            assert queue._reserved_bytes == 0
+        finally:
+            await queue.stop()
+
+    asyncio.run(scenario())
+
+
+def test_redis_rate_limiter_fails_closed_when_configured_for_production():
+    from core.ratelimit import RateLimitUnavailable, RedisRateLimiter
+
+    class ScriptFails:
+        async def __call__(self, **kwargs):
+            raise ConnectionError("redis unavailable")
+
+    class BrokenClient:
+        def register_script(self, source):
+            return ScriptFails()
+
+    async def scenario():
+        limiter = RedisRateLimiter(BrokenClient(), limit=2, window_seconds=60, fail_closed=True)
+        with pytest.raises(RateLimitUnavailable):
+            await limiter.check("k")
+
+    asyncio.run(scenario())
