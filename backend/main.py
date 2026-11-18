@@ -13,6 +13,7 @@ from core.config import generate_dev_key, get_settings
 from core.ratelimit import build_rate_limiter
 from core.security import register_ephemeral_key
 from schemas.job_schema import QueueHealth
+from schemas.focus_schema import SCHEMA_VERSION
 from services.job_queue import AuditQueue
 
 logging.basicConfig(
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI):
         limit=current.rate_limit_requests,
         window_seconds=current.rate_limit_window_seconds,
         redis_url=current.redis_url or None,
+        require_redis=current.is_production and bool(current.redis_url),
     )
 
     app.state.queue = AuditQueue(
@@ -61,6 +63,7 @@ async def lifespan(app: FastAPI):
         job_timeout_seconds=current.job_timeout_seconds,
         result_ttl_seconds=current.job_result_ttl_seconds,
         max_in_flight_per_key=current.max_jobs_in_flight_per_key,
+        max_bytes_in_flight=current.max_pending_bytes,
     )
     await app.state.queue.start()
 
@@ -75,10 +78,10 @@ settings = get_settings()
 
 app = FastAPI(
     title="CloudLeak",
-    version="1.1.0",
+    version="2.0.0",
     description=(
-        "Zero-IAM multi-cloud cost leak detection. Upload a billing export, get a "
-        "normalized waste audit and reviewable cleanup commands. "
+        "Offline multi-cloud billing evidence review. Upload a billing export, get "
+        "normalized charges and findings that require verification. "
         "Audits run asynchronously: POST an export, then poll the returned job."
     ),
     lifespan=lifespan,
@@ -114,7 +117,7 @@ def health_check(request: Request) -> QueueHealth:
     current = get_settings()
     return QueueHealth(
         status="ok",
-        schema_version="cloudleak-internal-v1",
+        schema_version=SCHEMA_VERSION,
         queue_depth=queue.depth() if queue else 0,
         workers=current.worker_count,
         auth_required=current.auth_configured or hasattr(request.app.state, "dev_api_key"),
