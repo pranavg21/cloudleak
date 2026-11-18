@@ -12,7 +12,7 @@ const STEPS = [
   },
   {
     title: "Read the meter",
-    body: "Waste ratio, ranked findings, and the exact CLI commands that clean them up. Yours to review, then run.",
+    body: "Billed charges, evidence levels, and checks to perform before any infrastructure change.",
   },
 ];
 
@@ -38,9 +38,9 @@ export default function LandingPage() {
               Your cloud bill already knows where the money is going.
             </h1>
             <p className="mt-6 max-w-xl text-lg leading-relaxed text-graphite">
-              Getting a FinOps tool approved means handing a vendor read access to production. That
-              review takes months. CloudLeak reads the billing export you can already download
-              today, and tells you what you are paying for that nothing is using.
+              Cloud cost exports can reveal charges worth investigating without granting live
+              access to your infrastructure. CloudLeak separates explicitly idle billing
+              signatures from charges that still require resource and dependency verification.
             </p>
 
             <dl className="mt-10 flex flex-wrap gap-x-10 gap-y-4 border-t border-hairline pt-6">
@@ -62,8 +62,8 @@ export default function LandingPage() {
           <div className="lg:pt-8">
             <CsvUploader />
             <p className="mt-4 text-xs leading-relaxed text-graphite">
-              Your file is parsed in memory and discarded when the response is sent. It is never
-              written to disk, and the report is held in this browser tab only.
+              Uploads are processed by the API and discarded from the job after parsing. Frameworks
+              may use temporary storage. The resulting report stays in this browser tab.
             </p>
           </div>
         </section>
@@ -91,12 +91,12 @@ export default function LandingPage() {
             <h2 className="font-display text-2xl font-600 tracking-signage">What it looks for</h2>
             <ul className="mt-5 space-y-4 text-sm leading-relaxed text-graphite">
               <li>
-                <strong className="font-500 text-ink">Orphaned storage.</strong> Managed disks, EBS
-                volumes and persistent disks still billing for provisioned capacity.
+                <strong className="font-500 text-ink">Disk capacity.</strong> Identify billed disk
+                resources that warrant attachment and ownership verification.
               </li>
               <li>
-                <strong className="font-500 text-ink">Idle public IPs.</strong> Addresses reserved
-                and charged under the unattached SKU.
+                <strong className="font-500 text-ink">Idle public IPv4.</strong> Identify AWS
+                idle-address billing codes; other public-IP charges need association checks.
               </li>
               <li>
                 <strong className="font-500 text-ink">Untagged spend.</strong> Cost with no owner
@@ -107,10 +107,9 @@ export default function LandingPage() {
           <div>
             <h2 className="font-display text-2xl font-600 tracking-signage">What it will not do</h2>
             <p className="mt-5 text-sm leading-relaxed text-graphite">
-              A billing export records what you were charged, not whether a disk is currently
-              attached. CloudLeak states every assumption it makes on the report, claims a
-              conservative share of matched disk spend rather than all of it, and never runs a
-              command for you. It hands you the plan; you confirm the resources and decide.
+              An export cannot prove whether a disk is attached, a load balancer serves production,
+              or a resource is safe to remove. CloudLeak does not claim arbitrary savings percentages
+              or generate deletion scripts. A topology-aware review is required before action.
             </p>
             <Link
               href="/dashboard"
