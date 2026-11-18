@@ -1,29 +1,24 @@
-/** Mirrors backend/schemas/focus_schema.py. Keep both sides in sync. */
+/** Matches backend/schemas/focus_schema.py (cloudleak-internal-v2). */
+
+export type EvidenceStatus = "idle_charge_observed" | "needs_verification";
 
 export interface AuditMetrics {
   total_billed_cost: number;
-  identified_waste: number;
-  waste_leak_ratio_pct: number;
   billing_currency: string;
   line_items_ingested: number;
   line_items_rejected: number;
   usage_cost: number;
   non_usage_cost: number;
   non_usage_line_items: number;
+  observed_idle_spend: number;
+  review_spend: number;
+  idle_charge_ratio_pct: number;
 }
 
 export interface WasteBreakdown {
-  orphaned_storage_waste: number;
-  zombie_ip_waste: number;
+  disk_review_spend: number;
+  idle_ipv4_spend: number;
   untagged_spend: number;
-}
-
-export interface RemediationCommand {
-  resource_id: string;
-  sub_account_name: string;
-  monthly_cost: number;
-  finding: string;
-  command: string;
 }
 
 export interface TopLeak {
@@ -32,7 +27,8 @@ export interface TopLeak {
   service_category: string;
   region: string;
   finding: string;
-  estimated_waste: number;
+  evidence_status: EvidenceStatus;
+  observed_cost: number;
 }
 
 export interface RuleFinding {
@@ -40,15 +36,15 @@ export interface RuleFinding {
   title: string;
   resource_count: number;
   matched_spend: number;
-  estimated_waste: number;
-  reclaim_factor: number;
+  evidence_status: EvidenceStatus;
   rationale: string;
+  verification: string;
 }
 
 export interface CategorySpend {
   label: string;
   amount: number;
-  waste: number;
+  observed_idle_spend: number;
 }
 
 export interface FocusVersionInfo {
@@ -70,12 +66,10 @@ export interface AuditReport {
   spend_by_service: CategorySpend[];
   spend_by_account: CategorySpend[];
   top_leaks: TopLeak[];
-  remediation_commands: RemediationCommand[];
   assumptions: string[];
 }
 
-/** Billing data is held for the session only and never persisted to disk. */
-export const REPORT_STORAGE_KEY = "cloudleak.report";
+export const REPORT_STORAGE_KEY = "cloudleak.report.v2";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
