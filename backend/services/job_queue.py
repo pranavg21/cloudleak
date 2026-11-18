@@ -64,6 +64,10 @@ class QueueFullError(RuntimeError):
     """The queue is at capacity; the caller should retry later."""
 
 
+class QueueMemoryLimitError(RuntimeError):
+    """In-flight uploads already occupy the configured memory budget."""
+
+
 class TooManyJobsError(RuntimeError):
     """This key already has the maximum number of audits in flight."""
 
@@ -91,7 +95,10 @@ class AuditQueue:
         job_timeout_seconds: int = 120,
         result_ttl_seconds: int = 900,
         max_in_flight_per_key: int = 3,
+        max_bytes_in_flight: int = 64 * 1024 * 1024,
     ) -> None:
+        if worker_count < 0 or max_size < 1 or max_bytes_in_flight < 1:
+            raise ValueError("Invalid queue limits")
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=max_size)
         self._jobs: Dict[str, Job] = {}
         self._workers: list[asyncio.Task] = []
@@ -100,6 +107,8 @@ class AuditQueue:
         self._job_timeout = job_timeout_seconds
         self._result_ttl = result_ttl_seconds
         self._max_in_flight_per_key = max_in_flight_per_key
+        self._max_bytes_in_flight = max_bytes_in_flight
+        self._reserved_bytes = 0
         self._lock = asyncio.Lock()
         self._running = False
 
@@ -124,6 +133,7 @@ class AuditQueue:
         await asyncio.gather(*[t for t in [*self._workers, self._reaper] if t], return_exceptions=True)
         self._workers.clear()
         self._jobs.clear()
+        self._reserved_bytes = 0
         logger.info("Audit queue stopped")
 
     # --- submission ----------------------------------------------------------
@@ -140,15 +150,20 @@ class AuditQueue:
                     f"You already have {in_flight} audit(s) running. Wait for one to finish."
                 )
 
+            if self._reserved_bytes + len(payload) > self._max_bytes_in_flight:
+                raise QueueMemoryLimitError("In-flight billing files exceed the memory budget. Try later.")
+
             job = Job(id=secrets.token_urlsafe(18), owner_key_id=owner_key_id, filename=filename)
             job.payload = payload
             self._jobs[job.id] = job
+            self._reserved_bytes += len(payload)
 
         try:
             self._queue.put_nowait(job.id)
         except asyncio.QueueFull as exc:
             async with self._lock:
                 self._jobs.pop(job.id, None)
+                self._reserved_bytes -= len(payload)
             raise QueueFullError("The audit queue is at capacity.") from exc
 
         return job
@@ -187,12 +202,27 @@ class AuditQueue:
             payload = job.payload or b""
 
             try:
-                # to_thread keeps pandas off the event loop; wait_for bounds a
-                # pathological file so one upload cannot occupy a worker forever.
-                job.report = await asyncio.wait_for(
-                    loop.run_in_executor(None, _run_audit, payload),
-                    timeout=self._job_timeout,
-                )
+                # The timeout bounds awaiting the executor. It does not
+                # terminate a thread that is still parsing the file.
+                future = loop.run_in_executor(None, _run_audit, payload)
+                try:
+                    job.report = await asyncio.wait_for(
+                        asyncio.shield(future), timeout=self._job_timeout
+                    )
+                except asyncio.TimeoutError:
+                    # An executor thread cannot be forcibly cancelled. Wait for it
+                    # before reusing this worker so timed-out jobs cannot create
+                    # unbounded concurrent parsing threads.
+                    job.status = JobStatus.FAILED
+                    job.error = (
+                        f"The audit exceeded the {self._job_timeout}s limit. "
+                        "Try a single billing period."
+                    )
+                    try:
+                        await future
+                    except Exception:
+                        logger.warning("Timed-out audit %s eventually failed", job.id)
+                    continue
                 job.status = JobStatus.SUCCEEDED
             except asyncio.TimeoutError:
                 job.status = JobStatus.FAILED
@@ -214,6 +244,8 @@ class AuditQueue:
             finally:
                 job.finished_at = time.time()
                 job.payload = None  # never retain the upload past processing
+                async with self._lock:
+                    self._reserved_bytes -= len(payload)
                 self._queue.task_done()
 
     async def _reap_expired(self) -> None:
