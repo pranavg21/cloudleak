@@ -21,10 +21,14 @@ from services.focus_versions import VersionCapabilities
 from services.waste_rules import rules_for
 
 MAX_TOP_LEAKS = 15
+# Match charge categories, not arbitrary substrings. AWS DiscountedUsage is
+# real instance usage; filtering on "discount" silently discards those charges.
 NON_USAGE_PATTERN = (
-    r"tax|credit|refund|discount|negation|rifee|savingsplan(?:recurring|negation)"
-    r"|adjustment|rounding|support|reserved instance fee|promotion|rebate"
+    r"^(?:tax|credit|refund|discount|bundleddiscount|edpdiscount|"
+    r"negation|rifee|savingsplan(?:recurringfee|upfrontfee|negation)|"
+    r"adjustment|rounding|support|reserved instance fee|promotion|rebate)$"
 )
+
 
 
 def split_usage(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -145,7 +149,7 @@ def execute_audit_engine(
         rule_findings.append(RuleFinding(
             key=rule.key,
             title=rule.title,
-            resource_count=len(identities),
+            resource_count=int((~identities["resource_id"].astype(str).str.lower().isin(["unknown", "", "nan"])).sum()),
             matched_spend=round(billed, 2),
             evidence_status=rule.evidence_status,
             rationale=rule.rationale,
