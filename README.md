@@ -10,7 +10,6 @@ The tool does not claim to know whether a resource is safe to delete.
 > **Important:** Billing signatures identify *historical charges*, not current
 > topology, attachment, service ownership, or guaranteed cost savings.
 
-![Dashboard from an earlier prototype; interface and labels may differ](docs/screenshot.png)
 
 ## What the engine can and cannot establish
 
