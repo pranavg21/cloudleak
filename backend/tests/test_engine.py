@@ -236,3 +236,20 @@ def test_rule_matched_spend_is_never_counted_twice():
     report = sample("focus_1_4_export.csv")
     assert sum(f.matched_spend for f in report.rule_findings) <= report.metrics.usage_cost
     assert report.metrics.review_spend == pytest.approx(sum(f.matched_spend for f in report.rule_findings))
+
+
+def test_aws_discounted_usage_is_not_excluded_as_a_discount():
+    report = report_for(aws_rows([
+        aws_row("vol-billed", "EBS:VolumeUsage.gp3", "15", charge="DiscountedUsage"),
+        aws_row("vol-tax", "EBS:VolumeUsage.gp3", "2", charge="Tax"),
+    ]))
+    assert report.metrics.usage_cost == 15
+    assert report.metrics.non_usage_cost == 2
+    assert report.metrics.review_spend == 15
+
+
+def test_unknown_resource_id_does_not_count_as_a_distinct_resource():
+    report = report_for(aws_rows([aws_row("", "EBS:VolumeUsage.gp3", "11")]))
+    finding = next(f for f in report.rule_findings if f.key == "disk_capacity")
+    assert finding.resource_count == 0
+    assert finding.matched_spend == 11
