@@ -8,10 +8,11 @@ import time
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 
 from core.config import Settings, get_settings
+from core.ratelimit import RateLimitUnavailable
 from core.security import Principal, require_api_key
 from schemas.focus_schema import ErrorResponse
 from schemas.job_schema import JobAccepted, JobState
-from services.job_queue import AuditQueue, JobStatus, QueueFullError, TooManyJobsError
+from services.job_queue import AuditQueue, JobStatus, QueueFullError, QueueMemoryLimitError, TooManyJobsError
 
 logger = logging.getLogger("cloudleak.audit")
 
@@ -36,7 +37,14 @@ async def enforce_rate_limit(request: Request, response: Response, principal: Pr
     if limiter is None:
         return
 
-    verdict = await limiter.check(principal.key_id)
+    try:
+        verdict = await limiter.check(principal.key_id)
+    except RateLimitUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The audit service is temporarily unavailable.",
+            headers={"Retry-After": "15"},
+        ) from exc
     response.headers["X-RateLimit-Limit"] = str(verdict.limit)
     response.headers["X-RateLimit-Remaining"] = str(verdict.remaining)
 
@@ -79,7 +87,8 @@ async def upload_cost_export(
     """Accept an export and queue it. Returns 202 with a job to poll.
 
     The file is validated synchronously so obvious mistakes fail immediately,
-    then handed to a worker. It is held in memory only until parsing finishes.
+    then handed to a worker. The payload is released after processing, but
+    the web framework may spool multipart uploads to temporary storage.
     """
     await enforce_rate_limit(request, response, principal)
 
@@ -128,6 +137,12 @@ async def upload_cost_export(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=str(exc),
             headers={"Retry-After": "10"},
+        ) from exc
+    except QueueMemoryLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+            headers={"Retry-After": "15"},
         ) from exc
     except QueueFullError as exc:
         raise HTTPException(
