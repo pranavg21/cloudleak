@@ -1,200 +1,127 @@
 # CloudLeak
 
-**Find cloud waste from a billing export. No IAM role, no API key, no live connection.**
+**Investigate cloud cost from a billing export—without live cloud-account access.**
 
-Most cloud cost tools need read access to your production accounts. Getting that
-approved takes a security review. CloudLeak takes a different route: it reads the
-billing export you can already download today.
+CloudLeak accepts CSV exports from AWS Cost and Usage Reports, Azure Cost Management,
+GCP billing, and a subset of FOCUS-shaped datasets. It detects the source, maps
+billing rows into a common internal schema, and highlights costs worth reviewing.
+The tool does not claim to know whether a resource is safe to delete.
 
-Upload the `.csv` from AWS Cost and Usage Reports, Azure Cost Management, or a GCP
-billing export. CloudLeak works out which cloud it came from, normalizes it into a
-single internal schema, finds spend going to resources nothing is using, and
-generates the cleanup commands — for you to review and run yourself.
+> **Important:** Billing signatures identify *historical charges*, not current
+> topology, attachment, service ownership, or guaranteed cost savings.
 
-![CloudLeak dashboard](docs/screenshot.png)
+![Dashboard from an earlier prototype; interface and labels may differ](docs/screenshot.png)
 
-![Findings by rule](docs/findings.png)
+## What the engine can and cannot establish
 
----
-
-## What it finds
-
-| Finding | How it's detected | What's claimed |
+| Evidence from the CSV | Finding | What still needs to be checked |
 | --- | --- | --- |
-| Orphaned storage | Disk, EBS volume and persistent-disk SKUs | 40% of matched spend |
-| Idle public IPs | Unattached-address SKUs | 100% of matched spend |
-| Accumulated snapshots | Snapshot and image-storage SKUs | 25% of matched spend |
-| Idle load balancers | Load balancer and gateway SKUs | 30% of matched spend |
-| Premium tier on cold storage | Premium/provisioned storage SKUs | 20%, flagged for review only |
-| Untagged spend | No account, project or resource group | Reported, not counted as waste |
-| Tax, credits, fees | Vendor charge-type column | Excluded from the ratio, reported separately |
+| AWS `PublicIPv4:IdleAddress` or legacy `ElasticIP:IdleAddress` usage | **Idle charge observed** in the billed period | Whether the IP is still idle, its owner and release dependencies |
+| EBS, Azure managed disk or GCP persistent disk charge | **Review candidate** | Attachment, workload, backup and ownership |
+| Generic public-IP SKU | **Review candidate** | Association and traffic; billed IP does not imply unused IP |
+| Snapshot or image-storage charge | **Review candidate** | Retention and restore policy |
+| Load-balancer hours or capacity-unit SKU, including AWS `AWSELB` | **Review candidate** | Targets, listeners, request/byte metrics and dependency graph |
+| Premium storage SKU | **Review candidate** | Workload performance, latency and actual access patterns |
 
-Disk spend is claimed at 40% rather than in full because **a billing export records
-what you were charged, not whether a disk is currently attached.** Idle-IP SKUs only
-bill while the address is unattached, so that spend is claimed fully. Untagged spend
-is a governance gap rather than waste — the money is buying something real, it just
-has no owner — so it stays out of the headline figure.
+The report keeps **observed idle-address charges** separate from **other spend
+requiring verification**. Neither is a forecast of recoverable spend. For
+that reason the app intentionally does **not** emit deletion or release commands.
 
-Every one of these assumptions is printed on the report itself.
+An apparent $100 disk charge is reported as $100 observed and $0 proven
+recoverable, not as a fictitious $40 saving. For an AWS idle-address usage
+charge, the reported amount represents that *past period* only.
 
----
-
-## Quick start
+## Run locally
 
 ```bash
-./run.sh          # macOS / Linux
-.\run.ps1         # Windows — right-click, Run with PowerShell
+./run.sh       # macOS / Linux
+.\run.ps1     # PowerShell on Windows
 ```
 
-Open `http://localhost:3000` and drop in any file from `samples/`.
+Open `http://localhost:3000` and use a CSV from `samples/`. For Windows
+installation details see [WINDOWS.md](WINDOWS.md).
 
-The script installs dependencies, mints an API key, wires both halves together and
-starts them. First run takes a few minutes.
-
-Windows setup from scratch: [WINDOWS.md](WINDOWS.md).
-
----
-
-## How it works
-
-```
-browser ──POST /api/audit──► Next.js route ──+ API key──► FastAPI
-                                                            │ 202 + job id
-browser ◄──────────────────── job id ◄──────────────────────┘
-                                                     queue → worker thread
-browser ──GET /api/audit/jobs/{id}──► Next.js ──► FastAPI ──► report
+```text
+CSV -> Next.js upload route -> FastAPI queue -> pandas normalization
+       -> provider-specific rule matches -> structured report -> dashboard
 ```
 
-**1. Detect the cloud.** Only the header row is read, then scored against each
-vendor's known columns — weighted, because cost columns are always present while
-optional ones vary by export configuration. A CUR with resource IDs disabled still
-resolves correctly.
+The parser rejects invalid cost values (and counts rejected rows), detects
+mixed billing currencies before adding costs, and separates usage from tax,
+credits and fees when charge-category fields are available. Costs refer to
+**the uploaded export period**; the app does not extrapolate them to monthly
+spend. When currency is absent it reports `UNSPECIFIED`, never silently USD.
 
-**2. Normalize.** Vendor columns map to seven internal fields, each taking the first
-candidate column that exists in the file. Rows whose cost value won't parse are
-rejected and counted, never coerced to zero — a zeroed row would silently shrink the
-denominator of the waste ratio.
+The normalized schema is inspired by FOCUS naming. It is **not FOCUS-conformant**;
+header-based version inference is approximate, not a validation or evidence
+that the tool implements every version-specific analysis.
 
-**3. Separate usage from everything else.** A billing export is not only usage — it
-also carries tax, credits, refunds, commitment fees and negations. Summing all of it
-and calling the result "billed cost" makes the ratio wrong in both directions:
-credits are negative and shrink the denominator, tax inflates it. FOCUS models this
-as `ChargeCategory`; vendors expose their own version (AWS `lineItem/LineItemType`,
-Azure `ChargeType`, GCP `cost_type`), which is normalized into `charge_category`.
-Only usage and purchases enter the denominator, and non-usage totals are reported
-separately. On `samples/aws_cur_with_charges.csv` this is the difference between a
-reported 12.13% and the correct 13.38%.
-
-**4. Detect waste.** Vectorized pandas rules match on the normalized categories, so
-one rule covers all three clouds. Findings are aggregated **per resource** before
-costing: a billing export carries one row per resource per day, so a single orphaned
-disk can appear hundreds of times.
-
-**5. Adapt to the export's FOCUS version.** Vendors adopt FOCUS at different paces,
-so an enterprise routinely holds exports written against several versions at once —
-plus historical files written against whatever was current at the time. CloudLeak
-infers the version from the columns present (`InvoiceId` implies 1.4+, `ChargeClass`
-implies 1.1+, `ServiceCategory` implies 1.0+), maps older column spellings
-(`SubAccountId` → `SubAccountName`, `ServiceName` → `ServiceCategory`), and reports
-analyses the detected version cannot support instead of silently returning zero.
-
-**6. Generate commands.** Ranked by cost, deduplicated in stable order, and
-shell-quoted (see Security).
-
-Performance: a 400,000-row (29 MB) export processes in about 2.4 seconds while the
-API stays responsive at single-digit milliseconds, because parsing runs on worker
-threads rather than in the request handler.
-
----
-
-## Security notes
-
-- **Generated commands are shell-quoted.** Resource IDs come from an uploaded file
-  and are pasted into a terminal, so every interpolated value passes through
-  `shlex.quote`. `samples/injection_probe.csv` contains a disk named
-  `disk-evil; rm -rf $HOME`; a test asserts it stays a single inert argument.
-- **Nothing runs automatically.** Commands sit behind an explicit acknowledgement in
-  the UI and are copy-only.
-- **Uploads are never written to disk** and are dropped from memory as soon as
-  parsing finishes. Reports expire on a TTL.
-- **Jobs are scoped to the key that created them.** Another key requesting your job
-  gets `404`, not `403`, so job IDs can't be probed.
-- **API keys are stored as SHA-256 digests** and compared in constant time.
-- **The browser never holds the API key.** It calls the app's own `/api/audit` routes,
-  which attach the key server-side.
-- **Production fails closed.** `CLOUDLEAK_ENV=production` without configured keys
-  raises at startup rather than serving an open endpoint.
-
----
-
-## Configuration
-
-Every value has a working default. Full list in `backend/.env.example`.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `CLOUDLEAK_ENV` | `development` | `production` refuses to start without auth |
-| `CLOUDLEAK_API_KEY_HASHES` | *(empty)* | SHA-256 digests of valid keys |
-| `CLOUDLEAK_ALLOWED_ORIGINS` | `http://localhost:3000` | CORS allowlist |
-| `CLOUDLEAK_RATE_LIMIT` / `_WINDOW` | `10` / `60s` | Audits per key per window |
-| `CLOUDLEAK_MAX_JOBS_PER_KEY` | `3` | Concurrent audits per key |
-| `CLOUDLEAK_WORKERS` | `2` | Simultaneous audits |
-| `CLOUDLEAK_QUEUE_SIZE` | `64` | Backlog before `503` |
-| `CLOUDLEAK_JOB_TIMEOUT` | `120s` | Kill switch for a pathological file |
-| `CLOUDLEAK_JOB_TTL` | `900s` | How long a finished report is kept |
-| `CLOUDLEAK_MAX_UPLOAD_MB` | `150` | Upload ceiling |
-| `CLOUDLEAK_REDIS_URL` | *(empty)* | Share rate limits across instances |
-
-Generate a key: `cd backend && python keygen.py "my-key"`
-
----
-
-## Tests
+## Validate
 
 ```bash
-cd backend && pip install pytest && python -m pytest tests/ -q
+cd backend
+python -m pip install -r requirements.txt pytest
+python -m pytest tests/ -q
 ```
 
-47 tests: detection and parsing accuracy against the sample exports, per-resource
-aggregation, rejected-row accounting, shell-injection containment, authentication,
-cross-tenant job access, rate limiting, queue backpressure, charge-type classification,
-FOCUS version detection, per-rule attribution, and startup safety.
+Tests cover provider detection, billed-versus-usage accounting, resource
+identity across accounts/regions, AWS idle and in-use IPv4 usage types,
+`AWSELB`, false-positive disk classifications, malformed/credit-only exports,
+currency consistency, authentication and queue isolation.
 
----
+The `samples/` files are **synthetic fixtures**. Names like `disk-orphan-01`
+are illustrative and should not be treated as evidence of actual attachment
+state. Evaluation on independently labeled production exports has not been
+performed.
 
-## Known limitations
+## Security and data handling
 
-Stated plainly, because the numbers matter more than the demo.
+- No cloud IAM role or cloud API credentials are required. The app's **own**
+  backend API key is still required outside the development configuration.
+- Billing files can contain account IDs, costs and other sensitive metadata.
+  FastAPI's `UploadFile` and Next.js multipart parsing **may use temporary
+  disk storage**. The job drops its upload payload after processing; results
+  are held in process memory until their TTL expires. The browser stores a
+  report in session storage. These properties are not guarantees of zero
+  disk use or end-to-end secure deletion.
+- The Next.js API proxy uses a server-side shared backend key; it has **no
+  per-user authentication**. Do not publicly expose it as a multi-user service
+  without adding identity, access controls and upload quotas.
+- Per-key rate limiting and the job queue run in-process by default. The
+  timeout bounds how long the worker awaits an audit; it does not forcibly
+  stop an executor thread that is already running.
+- No destructive remediation commands are generated or executed.
 
-- **FOCUS version support is partial.** CloudLeak detects which FOCUS version an
-  export was written against (0.5 through 1.4) and reports which analyses that
-  version's columns cannot support, rather than returning zero for them. It does not
-  yet implement the full column set of any version.
-- **Not FOCUS-conformant.** The internal schema is *modelled on* the FinOps FOCUS
-  specification and borrows its field naming, but FOCUS defines a large mandatory
-  column set and controlled enumerations (`ServiceCategory`, `ChargeCategory` and
-  others). CloudLeak uses seven fields and passes the vendor's own category strings
-  through unchanged. Treat the naming as a nod to FOCUS, not a compliance claim.
-- **The 40% disk reclaim factor is an assumption, not a measurement.** It needs
-  calibration against real billing data.
-- **No amortization or commitment-discount handling.** `BilledCost` only.
-- **Attachment state cannot be proven from billing data.** Detection is based on SKU
-  patterns, so findings should be verified in the console before acting.
-- **Single instance.** The job queue and rate limiter are in-process; a job submitted
-  to one instance is invisible to another. Set `CLOUDLEAK_REDIS_URL` for shared rate
-  limiting. The app warns about this at startup.
+Environment options are documented in `backend/.env.example`. Backend key
+creation: `cd backend && python keygen.py "a-key-of-your-choice"`.
 
----
+## Design limitations
+
+1. Billing history cannot establish resource attachment, live traffic, dependency
+   graph or owner approval. The output is a **triage queue**, not a removal list.
+2. Cross-metric correlation (for example, load-balancer hours versus processed
+   bytes/LCUs over matching intervals) is **not implemented**. The current rules
+   only match billing signatures.
+3. FOCUS coverage is deliberately partial; there is no usage normalization,
+   amortization or commitment-discount savings model.
+4. Parsing is chunked but parsed chunks are concatenated into a DataFrame;
+   peak memory still grows with input size. The job timeout is not a process
+   kill switch. Production deployment needs tighter resource isolation.
+5. Uploads have not been validated with a representative enterprise data set.
+
+Future work: integrate an optional resource inventory/topology evidence interface
+so findings can be corroborated before they become recommendations.
+
+## References
+
+- [AWS public IPv4 usage-type billing codes](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-billing-usage-reports.html)
+- [AWS Elastic Load Balancing billing codes](https://docs.aws.amazon.com/elasticloadbalancing/latest/userguide/load-balancer-billing-usage-reports.html)
 
 ## Built with
 
 Python · FastAPI · pandas · Pydantic · pytest · Next.js · React · TypeScript · Tailwind CSS
 
-Portions of this codebase were developed with AI assistance. Architecture, review and
-correctness decisions are my own.
+AI tools have assisted portions of development. The code and its limitations
+should be independently reviewed before production use.
 
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+MIT License · [LICENSE](LICENSE).
