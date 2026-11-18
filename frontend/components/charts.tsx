@@ -14,62 +14,32 @@ import { money } from "@/lib/format";
 
 // --- Waste by rule ------------------------------------------------------------
 
-export function WasteByRuleChart({
-  findings,
-  currency,
-}: {
-  findings: RuleFinding[];
-  currency: string;
-}) {
+export function WasteByRuleChart({ findings, currency }: { findings: RuleFinding[]; currency: string }) {
   if (findings.length === 0) return null;
-
-  const max = Math.max(...findings.map((f) => f.matched_spend));
-
+  const max = Math.max(...findings.map((finding) => finding.matched_spend));
   return (
     <section className="border border-hairline bg-panel">
       <div className="border-b border-hairline px-5 py-3">
-        <span className="eyebrow text-[11px] text-graphite">Findings by rule</span>
+        <span className="eyebrow text-[11px] text-graphite">Billing signatures to investigate</span>
       </div>
-
       <ul className="space-y-4 px-5 py-5">
-        {findings.map((finding) => {
-          const matchedPct = max > 0 ? (finding.matched_spend / max) * 100 : 0;
-          const claimedPct =
-            finding.matched_spend > 0
-              ? (finding.estimated_waste / finding.matched_spend) * 100
-              : 0;
-
-          return (
-            <li key={finding.key}>
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <span className="text-sm font-500">{finding.title}</span>
-                <span className="font-mono text-xs tabular text-graphite">
-                  {finding.resource_count} resource{finding.resource_count === 1 ? "" : "s"}
-                  {" · "}
-                  <span className="text-rust">{money(finding.estimated_waste, currency)}</span>
-                  {" of "}
-                  {money(finding.matched_spend, currency)}
-                </span>
-              </div>
-
-              {/* Outer bar: matched spend. Inner: the share actually claimed. */}
-              <div
-                className="relative mt-2 h-5 border border-hairline bg-concrete"
-                role="img"
-                aria-label={`${finding.title}: ${money(finding.estimated_waste, currency)} claimed of ${money(finding.matched_spend, currency)} matched`}
-              >
-                <div className="h-full bg-hairline/60" style={{ width: `${matchedPct}%` }}>
-                  <div className="h-full bg-rust" style={{ width: `${claimedPct}%` }} />
-                </div>
-              </div>
-
-              <p className="mt-1.5 text-[11px] leading-relaxed text-graphite">
-                Claims {Math.round(finding.reclaim_factor * 100)}% of matched spend.{" "}
-                {finding.rationale}
-              </p>
-            </li>
-          );
-        })}
+        {findings.map((finding) => (
+          <li key={finding.key}>
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <span className="text-sm font-500">{finding.title}</span>
+              <span className="font-mono text-xs tabular text-graphite">
+                {finding.resource_count} resource{finding.resource_count === 1 ? "" : "s"} · {money(finding.matched_spend, currency)} billed
+              </span>
+            </div>
+            <div className="relative mt-2 h-3 border border-hairline bg-concrete" role="img" aria-label={`${finding.title}: ${money(finding.matched_spend, currency)} billed`}>
+              <div className="h-full bg-verdigris/70" style={{ width: `${max > 0 ? finding.matched_spend / max * 100 : 0}%` }} />
+            </div>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-graphite">
+              {finding.evidence_status === "idle_charge_observed" ? "Idle-address charge observed." : "Needs external verification."} {finding.rationale}
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-graphite">Check: {finding.verification}</p>
+          </li>
+        ))}
       </ul>
     </section>
   );
@@ -99,7 +69,7 @@ export function SpendBreakdownChart({
       <ul className="space-y-3 px-5 py-5">
         {data.map((item) => {
           const barPct = max > 0 ? (item.amount / max) * 100 : 0;
-          const wastePct = item.amount > 0 ? (item.waste / item.amount) * 100 : 0;
+          const idlePct = item.amount > 0 ? (item.observed_idle_spend / item.amount) * 100 : 0;
 
           return (
             <li key={item.label}>
@@ -109,8 +79,8 @@ export function SpendBreakdownChart({
                 </span>
                 <span className="shrink-0 font-mono text-xs tabular text-graphite">
                   {money(item.amount, currency)}
-                  {item.waste > 0 && (
-                    <span className="text-rust"> · {money(item.waste, currency)} recoverable</span>
+                  {item.observed_idle_spend > 0 && (
+                    <span className="text-rust"> · {money(item.observed_idle_spend, currency)} idle IPv4</span>
                   )}
                 </span>
               </div>
@@ -120,7 +90,7 @@ export function SpendBreakdownChart({
                 aria-label={`${item.label}: ${money(item.amount, currency)}`}
               >
                 <div className="h-full bg-verdigris/50" style={{ width: `${barPct}%` }}>
-                  <div className="h-full bg-rust" style={{ width: `${wastePct}%` }} />
+                  <div className="h-full bg-rust" style={{ width: `${idlePct}%` }} />
                 </div>
               </div>
             </li>
@@ -151,9 +121,9 @@ export function CostCompositionBar({
   const wastePct = usage > 0 ? (waste / usage) * usagePct : 0;
 
   const segments = [
-    { label: "Recoverable", value: waste, width: wastePct, className: "bg-rust" },
+    { label: "Observed idle IPv4", value: waste, width: wastePct, className: "bg-rust" },
     {
-      label: "Usage in service",
+      label: "Other usage charges",
       value: usage - waste,
       width: usagePct - wastePct,
       className: "bg-verdigris",

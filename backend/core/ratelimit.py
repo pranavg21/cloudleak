@@ -74,6 +74,10 @@ class InMemoryRateLimiter:
         self._hits.clear()
 
 
+class RateLimitUnavailable(RuntimeError):
+    """Configured shared rate limiter is temporarily unavailable."""
+
+
 class RedisRateLimiter:
     """Shared sliding window using a Redis sorted set, applied atomically."""
 
@@ -95,8 +99,9 @@ class RedisRateLimiter:
     return {1, limit - count - 1, '0'}
     """
 
-    def __init__(self, redis_client, limit: int, window_seconds: int) -> None:
+    def __init__(self, redis_client, limit: int, window_seconds: int, *, fail_closed: bool = False) -> None:
         self._redis = redis_client
+        self._fail_closed = fail_closed
         self._limit = limit
         self._window = window_seconds
         self._script = redis_client.register_script(self._SCRIPT)
@@ -109,9 +114,9 @@ class RedisRateLimiter:
                 args=[now, self._window, self._limit],
             )
         except Exception:
-            # A rate limiter that is down must not take the API down with it.
-            # Fail open, but loudly.
-            logger.exception("Rate limiter unavailable; allowing request")
+            logger.exception("Rate limiter unavailable")
+            if self._fail_closed:
+                raise RateLimitUnavailable("Rate limiting service is unavailable")
             return RateLimitVerdict(True, self._limit, 0, self._limit)
 
         if int(allowed) == 1:
@@ -125,7 +130,7 @@ class RedisRateLimiter:
 
 
 async def build_rate_limiter(
-    limit: int, window_seconds: int, redis_url: Optional[str]
+    limit: int, window_seconds: int, redis_url: Optional[str], *, require_redis: bool = False
 ) -> RateLimiter:
     """Return a Redis limiter when configured and reachable, else in-memory."""
     if redis_url:
@@ -135,10 +140,14 @@ async def build_rate_limiter(
             client = redis.from_url(redis_url, decode_responses=True)
             await client.ping()
             logger.info("Rate limiting via Redis")
-            return RedisRateLimiter(client, limit, window_seconds)
-        except ImportError:
-            logger.warning("CLOUDLEAK_REDIS_URL set but 'redis' is not installed; using memory")
-        except Exception:
+            return RedisRateLimiter(client, limit, window_seconds, fail_closed=require_redis)
+        except ImportError as exc:
+            if require_redis:
+                raise RuntimeError("Redis is configured but its Python dependency is unavailable") from exc
+            logger.warning("Redis configured but its dependency is unavailable; using memory")
+        except Exception as exc:
+            if require_redis:
+                raise RuntimeError("Configured Redis rate limiter is unreachable") from exc
             logger.warning("Redis unreachable; falling back to in-memory rate limiting")
 
     logger.info("Rate limiting in memory (single process only)")

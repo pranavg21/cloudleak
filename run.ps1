@@ -54,7 +54,7 @@ CLOUDLEAK_API_KEY=$apiKey
 
 if (-not (Test-Path "node_modules")) {
   Say "Installing web app dependencies (first run only)..."
-  cmd /c "npm install --no-audit --no-fund"
+  cmd /c "npm ci --no-audit --no-fund"
   if ($LASTEXITCODE -ne 0) { Die "npm install failed. Check your internet connection." }
 }
 
@@ -68,7 +68,7 @@ Start-Process cmd -ArgumentList "/k", $backendCmd -WorkingDirectory "$Root\backe
 Start-Sleep -Seconds 6
 
 Say "Starting the web app on port $FrontendPort..."
-Start-Process cmd -ArgumentList "/k", "npm run dev -- --port $FrontendPort" -WorkingDirectory "$Root\frontend"
+Start-Process cmd -ArgumentList "/k", "npm run dev -- --port $FrontendPort --hostname 127.0.0.1" -WorkingDirectory "$Root\frontend"
 
 Start-Sleep -Seconds 12
 

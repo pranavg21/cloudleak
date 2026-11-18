@@ -48,7 +48,7 @@ EOF
 
 if [ ! -d node_modules ]; then
   say "Installing frontend dependencies (first run only, takes a minute)..."
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
 fi
 
 # --- launch -------------------------------------------------------------------
@@ -78,7 +78,7 @@ done
 
 say "Starting the web app on port ${FRONTEND_PORT}..."
 cd "$ROOT/frontend"
-npm run dev -- --port "$FRONTEND_PORT" > /tmp/cloudleak-frontend.log 2>&1 &
+npm run dev -- --port "$FRONTEND_PORT" --hostname 127.0.0.1 > /tmp/cloudleak-frontend.log 2>&1 &
 FRONTEND_PID=$!
 
 for _ in $(seq 1 60); do

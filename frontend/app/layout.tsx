@@ -21,9 +21,9 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CloudLeak — find cloud waste without handing over credentials",
+  title: "CloudLeak — investigate cloud spend without cloud-account access",
   description:
-    "Upload an Azure, AWS or GCP billing export. Get a waste audit and reviewable cleanup commands in seconds. No IAM roles, no API keys.",
+    "Upload an Azure, AWS or GCP billing export. Classify billed spend and investigate idle-address charges without live cloud-account access.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

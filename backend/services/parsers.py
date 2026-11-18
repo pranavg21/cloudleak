@@ -255,7 +255,8 @@ def parse_and_normalize_csv(
 
     frames: List[pd.DataFrame] = []
     rejected = 0
-    currency = "USD"
+    currency = "UNSPECIFIED"
+    observed_currencies: set[str] = set()
 
     reader = pd.read_csv(
         io.StringIO(content),
@@ -270,9 +271,20 @@ def parse_and_normalize_csv(
         chunk.columns = [_normalize_header(str(c)) for c in chunk.columns]
 
         if profile.currency_column and profile.currency_column in chunk.columns:
-            found = chunk[profile.currency_column].dropna()
-            if not found.empty:
-                currency = str(found.iloc[0]).strip() or "USD"
+            values = chunk[profile.currency_column].dropna().astype(str).str.strip().str.upper()
+            observed_currencies.update(value for value in values if value)
+            if any(len(value) != 3 or not value.isalpha() for value in observed_currencies):
+                raise UnreadableExportError(
+                    "BillingCurrency must contain three-letter currency codes. "
+                    "Check that each CSV row matches the header."
+                )
+            if len(observed_currencies) > 1:
+                raise UnreadableExportError(
+                    "This export contains multiple billing currencies. Split it by currency "
+                    "before running an audit; costs cannot be added without conversion."
+                )
+            if observed_currencies:
+                currency = next(iter(observed_currencies))
 
         out = pd.DataFrame(index=chunk.index)
         out["provider_name"] = profile.name
@@ -281,6 +293,7 @@ def parse_and_normalize_csv(
             chunk[resolved["billed_cost"]].str.replace(",", "", regex=False).str.strip(),
             errors="coerce",
         )
+        cost = cost.replace([float("inf"), float("-inf")], float("nan"))
         rejected += int(cost.isna().sum())
         out["billed_cost"] = cost
 
