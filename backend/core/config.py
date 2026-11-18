@@ -58,14 +58,18 @@ class Settings:
     # Queue sizing. Workers are threads because pandas parsing is CPU-bound and
     # would otherwise block the event loop.
     worker_count: int = field(default_factory=lambda: _env_int("CLOUDLEAK_WORKERS", 2))
-    queue_max_size: int = field(default_factory=lambda: _env_int("CLOUDLEAK_QUEUE_SIZE", 64))
+    queue_max_size: int = field(default_factory=lambda: _env_int("CLOUDLEAK_QUEUE_SIZE", 8))
     job_timeout_seconds: int = field(default_factory=lambda: _env_int("CLOUDLEAK_JOB_TIMEOUT", 120))
     # Completed reports are dropped this long after they finish. Billing data
     # should not sit in memory indefinitely.
     job_result_ttl_seconds: int = field(default_factory=lambda: _env_int("CLOUDLEAK_JOB_TTL", 900))
 
     max_upload_bytes: int = field(
-        default_factory=lambda: _env_int("CLOUDLEAK_MAX_UPLOAD_MB", 150) * 1024 * 1024
+        default_factory=lambda: _env_int("CLOUDLEAK_MAX_UPLOAD_MB", 20) * 1024 * 1024
+    )
+
+    max_pending_bytes: int = field(
+        default_factory=lambda: _env_int("CLOUDLEAK_MAX_PENDING_MB", 64) * 1024 * 1024
     )
 
     redis_url: str = field(default_factory=lambda: os.getenv("CLOUDLEAK_REDIS_URL", ""))
@@ -87,8 +91,12 @@ class Settings:
             problems.append("CLOUDLEAK_ALLOWED_ORIGINS contains a wildcard.")
         if not self.redis_url and self.worker_count > 0:
             problems.append(
-                "CLOUDLEAK_REDIS_URL is unset: rate limits and job state are per-process "
-                "and will not hold across more than one instance."
+                "Rate limits are per-process without Redis. Job state is always per-process; "
+                "run one application instance until a shared job store is implemented."
+            )
+        if self.redis_url:
+            problems.append(
+                "Redis only shares rate limits. Audit jobs and results are still stored in this process."
             )
         return problems
 
