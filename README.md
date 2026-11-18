@@ -60,7 +60,7 @@ that the tool implements every version-specific analysis.
 
 ```bash
 cd backend
-python -m pip install -r requirements.txt pytest
+python -m pip install -r requirements.txt pytest "httpx>=0.27"
 python -m pytest tests/ -q
 ```
 
