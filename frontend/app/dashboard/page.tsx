@@ -10,7 +10,6 @@ import {
 import { KpiCards } from "@/components/kpi-cards";
 import { LeakGauge } from "@/components/leak-gauge";
 import { LeakTable } from "@/components/leak-table";
-import { RemediationTerminal } from "@/components/remediation-terminal";
 import { REPORT_STORAGE_KEY, type AuditReport } from "@/lib/types";
 
 type LoadState = "loading" | "ready" | "empty";
@@ -69,7 +68,6 @@ export default function DashboardPage() {
     metrics,
     waste_breakdown,
     top_leaks,
-    remediation_commands,
     assumptions,
     rule_findings,
     spend_by_service,
@@ -114,8 +112,8 @@ export default function DashboardPage() {
           totalBilled={metrics.total_billed_cost}
           usageCost={metrics.usage_cost}
           nonUsageCost={metrics.non_usage_cost}
-          identifiedWaste={metrics.identified_waste}
-          ratioPct={metrics.waste_leak_ratio_pct}
+          identifiedWaste={metrics.observed_idle_spend}
+          ratioPct={metrics.idle_charge_ratio_pct}
           currency={currency}
         />
 
@@ -124,7 +122,7 @@ export default function DashboardPage() {
         <CostCompositionBar
           usage={metrics.usage_cost}
           nonUsage={metrics.non_usage_cost}
-          waste={metrics.identified_waste}
+          waste={metrics.observed_idle_spend}
           currency={currency}
         />
 
@@ -152,9 +150,9 @@ export default function DashboardPage() {
             </p>
             {focus_version.unsupported_rules.length > 0 && (
               <p className="mt-2 text-sm leading-relaxed text-graphite">
-                Analyses unavailable at this version:{" "}
+                Columns missing for potential future analyses (not executed by CloudLeak):{" "}
                 {focus_version.unsupported_rules.map((r) => r.replace(/_/g, " ")).join(", ")}.
-                They were skipped rather than reported as zero.
+                Version inference is heuristic, not FOCUS conformance testing.
               </p>
             )}
           </section>
@@ -162,11 +160,18 @@ export default function DashboardPage() {
 
         <div className="grid gap-8 lg:grid-cols-2">
           <LeakTable leaks={top_leaks} currency={currency} />
-          <RemediationTerminal
-            commands={remediation_commands}
-            provider={report.detected_provider}
-            currency={currency}
-          />
+          <section className="border border-hairline bg-panel px-5 py-5">
+            <span className="eyebrow text-[11px] text-graphite">Before changing infrastructure</span>
+            <ol className="mt-4 list-decimal space-y-3 pl-4 text-sm leading-relaxed text-graphite">
+              <li>Confirm each resource still exists and is in the reported account and region.</li>
+              <li>Verify attachment, request metrics and upstream/downstream dependencies.</li>
+              <li>Confirm ownership, retention policy, rollback plan and approval.</li>
+              <li>Calculate potential future savings using current rates and usage.</li>
+            </ol>
+            <p className="mt-5 text-xs leading-relaxed text-graphite">
+              This offline report cannot safely authorize deletion. It does not generate cleanup commands.
+            </p>
+          </section>
         </div>
 
         <section className="border border-hairline bg-panel">
