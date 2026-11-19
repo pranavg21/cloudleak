@@ -30,6 +30,26 @@ An apparent $100 disk charge is reported as $100 observed and $0 proven
 recoverable, not as a fictitious $40 saving. For an AWS idle-address usage
 charge, the reported amount represents that *past period* only.
 
+## Check an invoice before reviewing resources
+
+When a client sends an invoice and its line-item CSV, compare the two locally.
+Use a CSV with `InvoiceId`, `BillingCurrency` and `BilledCost` columns. Enter
+the total for the same invoice scope, including any taxes, fees and credits
+represented in the export. For example, from the repository root:
+
+```bash
+python reconcile.py billing.csv --invoice INV-1042 --currency USD --total 812.36
+```
+
+The JSON report gives the signed difference (export minus invoice), the number
+of records included and skipped, and a SHA-256 fingerprint of the input file.
+A positive difference means the export adds up to more than the invoice.
+The comparison uses exact decimals. Even a sub-cent residual is reported.
+Exit codes are 0 for an exact match, 1 for a difference and 2 when the input
+cannot support the comparison. Rows with a missing invoice ID block the check
+because their scope is unknown. Use a single issuer's export with unique invoice
+IDs. Equal totals alone cannot establish line-item completeness.
+
 ## Run locally
 
 ```bash
