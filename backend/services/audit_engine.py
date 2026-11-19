@@ -93,6 +93,8 @@ def execute_audit_engine(
     rejected_rows: int = 0,
     currency: str = "USD",
     capabilities: VersionCapabilities | None = None,
+    *,
+    evidence_records: dict[str, list[int]] | None = None,
 ) -> AuditReportResponse:
     """Return evidence for investigation, not speculative savings or deletion scripts."""
     if df.empty:
@@ -134,6 +136,8 @@ def execute_audit_engine(
             continue
         claimed |= mask
         matched = usage_df.loc[mask]
+        if evidence_records is not None:
+            evidence_records[rule.key] = matched.index.tolist()
         billed = float(matched["billed_cost"].sum())
         if rule.evidence_status == "idle_charge_observed":
             idle_mask |= mask

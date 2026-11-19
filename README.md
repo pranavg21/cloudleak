@@ -11,6 +11,41 @@ The tool does not claim to know whether a resource is safe to delete.
 > topology, attachment, service ownership, or guaranteed cost savings.
 
 
+## Review a bill from start to finish
+
+A client sends two invoices in one CSV. You need to reconcile one of them and
+give its engineer the resource IDs and charge records worth checking. From the
+repository root, using Python 3.10+ in a virtual environment:
+
+```bash
+python -m pip install -r backend/requirements.txt
+python investigate.py samples/invoice-review.csv --invoice DEMO-1042 --currency USD --total 22.00 --output review.html
+```
+
+Open `review.html` locally. The sample is synthetic. Three records belong to
+DEMO-1042: a 24.75 disk charge, a −4.75 credit and a 2.00 snapshot charge.
+They total 22.00 USD. The 90.00 disk on the other invoice stays out. Expand
+either finding for its account, region, resource, SKU and original CSV record
+numbers. Use the verification question when handing the finding to its owner.
+The report contains client identifiers and costs. Share it within the same
+access boundary as the source export.
+
+For a native AWS, Azure or GCP CSV, omit the three invoice arguments to review
+the whole file. For machine-readable output, give the destination a `.json`
+extension. Both formats run locally with no server or cloud credentials.
+Invoice comparison requires the three columns described below and a single
+issuer. Whole-export analysis reports the cost column used. Files are capped
+at 20 MiB. Monetary inputs must be plain decimals without grouping separators.
+The invoice comparison preserves decimal precision; investigation amounts
+are displayed to two decimal places.
+
+Exit 0 means the packet was written, exit 1 means it was written with an
+invoice difference, and exit 2 means the command failed. Existing output files
+are preserved. Every packet includes the original file fingerprint. A match
+does not establish completeness: offsetting errors can cancel out. A native
+export total can omit taxes, discounts or credits represented outside its cost
+column. Check the export basis before comparing it with a payable balance.
+
 ## What the engine can and cannot establish
 
 | Evidence from the CSV | Finding | What still needs to be checked |
@@ -29,6 +64,26 @@ that reason the app intentionally does **not** emit deletion or release commands
 An apparent $100 disk charge is reported as $100 observed and $0 proven
 recoverable, not as a fictitious $40 saving. For an AWS idle-address usage
 charge, the reported amount represents that *past period* only.
+
+## Check an invoice before reviewing resources
+
+When a client sends an invoice and its line-item CSV, compare the two locally.
+Use a CSV with `InvoiceId`, `BillingCurrency` and `BilledCost` columns. Enter
+the total for the same invoice scope, including any taxes, fees and credits
+represented in the export. For example, from the repository root:
+
+```bash
+python reconcile.py billing.csv --invoice INV-1042 --currency USD --total 812.36
+```
+
+The JSON report gives the signed difference (export minus invoice), the number
+of records included and skipped, and a SHA-256 fingerprint of the input file.
+A positive difference means the export adds up to more than the invoice.
+The comparison uses exact decimals. Even a sub-cent residual is reported.
+Exit codes are 0 for an exact match, 1 for a difference and 2 when the input
+cannot support the comparison. Rows with a missing invoice ID block the check
+because their scope is unknown. Use a single issuer's export with unique invoice
+IDs. Equal totals alone cannot establish line-item completeness.
 
 ## Run locally
 
