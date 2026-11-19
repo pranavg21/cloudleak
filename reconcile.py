@@ -18,7 +18,13 @@ def amount(value):
 
 
 def reconcile(path, invoice, currency, expected):
-    data = path.read_bytes()
+    return reconcile_bytes(path.read_bytes(), invoice, currency, expected)
+
+
+def reconcile_bytes(data, invoice, currency, expected, selected_records=None):
+    """Optionally retain one-based CSV record numbers for a scoped audit."""
+    if not re.fullmatch("[A-Z]{3}", currency):
+        raise ValueError("supply a three-letter billing currency")
     reader = csv.DictReader(io.StringIO(data.decode("utf-8-sig"), newline=""), strict=True)
     headers = reader.fieldnames or []
     required = {"InvoiceId", "BillingCurrency", "BilledCost"}
@@ -41,6 +47,8 @@ def reconcile(path, invoice, currency, expected):
                 total += amount(row["BilledCost"])
             except ValueError as exc:
                 raise ValueError(f"data record {record}: invalid BilledCost") from exc
+            if selected_records is not None:
+                selected_records.append(record)
             matched += 1
         if not matched:
             raise ValueError("no rows for the requested invoice")
@@ -64,8 +72,6 @@ def main():
     args = parser.parse_args()
     try:
         result = reconcile(args.export, args.invoice.strip(), args.currency.strip().upper(), amount(args.total))
-        if not re.fullmatch("[A-Z]{3}", result["currency"]):
-            raise ValueError("supply a three-letter billing currency")
     except (OSError, ValueError, csv.Error) as exc:
         print(f"Cannot reconcile: {exc}", file=sys.stderr)
         return 2
@@ -75,3 +81,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
