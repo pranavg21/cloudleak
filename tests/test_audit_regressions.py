@@ -83,7 +83,9 @@ def test_d3_missing_provider_is_an_export_gap_not_discontinued_spend(demo, tmp_p
 
 def test_d4_unwritable_output_is_actionable(tmp_path, capsys):
     p = write_csv(tmp_path / "x.csv", AWS_COLS, [aws_row()])
-    assert main(["audit", str(p), "-o", "/proc/nope/x.html", "-q"]) == 2
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("a regular file cannot hold an output file, on any OS")
+    assert main(["audit", str(p), "-o", str(blocker / "x.html"), "-q"]) == 2
     err = capsys.readouterr().err
     assert "cannot access" in err and "bug" not in err
 

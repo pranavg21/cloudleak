@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import platform
-import resource
 import subprocess
 import sys
 import time
@@ -59,6 +58,10 @@ def timed(cmd: list[str]) -> dict:
     start = time.perf_counter()
     proc = subprocess.run([*cmd], capture_output=True, text=True, check=False)  # noqa: S603
     wall = time.perf_counter() - start
+    try:
+        import resource  # Unix only
+    except ImportError:  # Windows: wall time only
+        return {"seconds": round(wall, 2), "peak_rss_mib_max_so_far": None, "exit": proc.returncode}
     rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss  # KiB on Linux, bytes on macOS
     if sys.platform == "darwin":
         rss //= 1024
