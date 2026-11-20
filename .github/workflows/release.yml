@@ -42,7 +42,7 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: actions/attest-build-provenance@v1
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/*.whl, dist/*.tar.gz"
       - name: Keep only Python distributions for upload
@@ -89,7 +89,7 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.image }}:${{ github.ref_name }}
-      - uses: actions/attest-build-provenance@v1
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ steps.meta.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
