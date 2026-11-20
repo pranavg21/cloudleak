@@ -442,11 +442,24 @@ def main(argv: list[str] | None = None) -> int:
         if exc.hint:
             print(f"  hint: {exc.hint}", file=sys.stderr)
         return exc.exit_code
+    except OSError as exc:
+        where = f" {exc.filename}" if getattr(exc, "filename", None) else ""
+        print(f"cloudleak: error: cannot access{where}: {exc.strerror or exc}", file=sys.stderr)
+        print("  hint: check the path exists and that you can read the inputs and write the output location.",
+              file=sys.stderr)
+        return EXIT_INPUT
     except KeyboardInterrupt:
         return 130
     except BrokenPipeError:
         return EXIT_OK
     except Exception as exc:
+        import duckdb
+        if isinstance(exc, (duckdb.OutOfMemoryException, duckdb.IOException)):
+            print(f"cloudleak: error: the query engine ran out of memory or spill space ({str(exc)[:200]})",
+                  file=sys.stderr)
+            print("  hint: raise --memory-limit, or point --temp-dir at a disk with more free space.",
+                  file=sys.stderr)
+            return EXIT_INPUT
         if os.environ.get("CLOUDLEAK_DEBUG"):
             traceback.print_exc()
         print(f"cloudleak: internal error: {type(exc).__name__}: {str(exc)[:300]}", file=sys.stderr)

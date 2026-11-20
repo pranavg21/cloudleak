@@ -36,25 +36,22 @@ by the published JSON Schema.
 
 ## Install
 
-Python 3.10 or newer. The PyPI distribution is **`cloudleak-cli`**; the command is `cloudleak`.
-
-```bash
-pipx install cloudleak-cli
-```
-
-or with uv:
-
-```bash
-uv tool install cloudleak-cli
-```
-
-Until the first PyPI release, install from GitHub:
+Python 3.10 or newer. The command is `cloudleak`.
 
 ```bash
 pipx install git+https://github.com/pranavg21/cloudleak
 ```
 
-> The PyPI project named `cloudleak` (without `-cli`) is an unrelated package. Install `cloudleak-cli`.
+or with uv:
+
+```bash
+uv tool install git+https://github.com/pranavg21/cloudleak
+```
+
+Once 0.1.0 is released, the PyPI distribution will be **`cloudleak-cli`** (`pipx install cloudleak-cli`).
+Releases are published only by this repository's release workflow, with provenance you can verify
+(see [SECURITY.md](SECURITY.md#supply-chain)). The PyPI project named `cloudleak` (without `-cli`) is an
+unrelated package.
 
 To run with no network at all, see [Air-gapped and container use](#air-gapped-and-container-use).
 
@@ -197,9 +194,12 @@ Python 3.13, DuckDB 2.0.1, default `--memory-limit 2GB`:
 | --- | --- | --- | --- | --- | --- |
 | 1,000,000 | 394 MB | 26 MB | 10 s | 11 s | 1.6 GB |
 | 3,000,000 | 1.24 GB | 78 MB | 29 s | 31 s | 2.1 GB |
+| 10,000,000 | ~4.1 GB | 259 MB | 79 s | 100 s | 2.4 GB |
 
-Memory is bounded by `--memory-limit`, not by file size; DuckDB spills to `--temp-dir` beyond it. Run the
-script on your hardware before you rely on these numbers.
+Memory is bounded by `--memory-limit`, not by file size; DuckDB spills to `--temp-dir` beyond it (about
+1.4 GB of spill at 10M rows). `redact` is slower because every cell passes through the scrubber and the
+residual scan: about 2 minutes per million rows of this shape. Inputs above ~4 GB uncompressed have not been
+measured. Run the script on your hardware before you rely on these numbers.
 
 ## Air-gapped and container use
 
@@ -237,6 +237,7 @@ or done well by others (OpenCost, Infracost, OpenOps, focus_validator, native cl
 intended to stay stable; breaking changes will bump the schema version. The earlier Next.js / FastAPI
 prototype was retired in favor of this CLI; it is preserved in git history at commit `489fbff`.
 
+[docs/validation.md](docs/validation.md) lists, export by export, what is tested and what is not.
 Validation so far uses synthetic fixtures with exact ground truth plus adversarial cases (attached disks,
 in-use IPs, GPUs, refunds, identical Azure rows, preliminary months, hostile tags, malformed files). It
 has not yet been evaluated on independently labeled production exports. If you run it on real exports,

@@ -10,6 +10,8 @@ every column. They are kept: blind de-duplication silently halves spend.
 
 from __future__ import annotations
 
+import re
+
 from cloudleak.providers.base import Columns, Mapping, month_start
 
 SIGNATURE = ("cost_in_billing_currency", "pre_tax_cost", "meter_category", "subscription_id",
@@ -38,10 +40,11 @@ END"""
 
 
 def basis_from_name(name: str) -> str | None:
-    lname = name.lower()
-    if "amortized" in lname or "amortised" in lname:
+    """'actual' / 'amortized' as a separate word in the path ('ActualCost', 'azure-actual', not 'contractual')."""
+    words = set(re.findall(r"[a-z]+", re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name).lower()))
+    if words & {"amortized", "amortised", "amortizedcost"}:
         return "amortized"
-    if "actual" in lname:
+    if words & {"actual", "actualcost", "actuals"}:
         return "billed"
     return None
 

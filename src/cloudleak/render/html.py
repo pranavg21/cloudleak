@@ -11,6 +11,7 @@ from decimal import Decimal
 from html import escape
 
 from cloudleak.money import display
+from cloudleak.render.formats import owner_label
 from cloudleak.report import CAN_CANNOT, ISSUES_URL
 
 CSS = """
@@ -185,9 +186,10 @@ def render(report: dict) -> str:
         head.append(f'<div class="banner warn">PRELIMINARY ESTIMATE: {e(names)} not finalized. Amounts can '
                     "still change as late charges, credits and refunds post.</div>")
     if doctor and doctor["counts"]["FAIL"]:
-        head.append(f'<div class="banner bad">{doctor["counts"]["FAIL"]} data-quality check(s) failed. Totals '
-                    "below exclude rows that could not be read exactly; fix the inputs before relying on them."
-                    "</div>")
+        fails = [c for c in doctor["results"] if c["status"] == "FAIL"]
+        items = "".join(f"<li>{e(c['check_id'])} {e(c['title'])}: {e(c['message'])}</li>" for c in fails[:6])
+        head.append(f'<div class="banner bad">TOTALS MAY BE WRONG: {len(fails)} data-quality check(s) failed. '
+                    f"Fix the inputs before relying on any number in this report.<ul>{items}</ul></div>")
     sections.append("".join(head))
 
     # KPIs
@@ -229,7 +231,7 @@ def render(report: dict) -> str:
         changes = [[e(c["service"]), e(c["sku"]), e(c.get("sub_account_name") or c.get("sub_account_id") or ""),
                     money(c["base_cost"]), money(c["current_cost"]), money(c["delta"]),
                     e(DRIVER_LABELS.get(c["driver"], c["driver"])),
-                    e((c.get("owner_routing") or {}).get("value") or "unattributed")]
+                    e(owner_label(c.get("owner_routing")))]
                    for c in br["top_line_changes"][:15]]
         cats = [[e(c["service_category"]), money(c["base_cost"]), money(c["current_cost"]), money(c["delta"])]
                 for c in br["by_service_category"]]
@@ -356,9 +358,7 @@ def _finding_html(f: dict) -> str:
     fin = f["period_finality"]
     cur = f["currency"]
     owner = f.get("owner_routing") or {}
-    owner_txt = owner.get("value") or "unattributed"
-    if owner.get("status") == "tag":
-        owner_txt = f"{owner.get('key')}={owner.get('value')}"
+    owner_txt = owner_label(owner)
     where = f.get("resource_id") or f.get("sub_account_id") or ""
     steps = []
     for s in f.get("required_verification_steps", []):

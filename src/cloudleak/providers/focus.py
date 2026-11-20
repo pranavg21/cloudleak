@@ -17,7 +17,7 @@ from cloudleak.providers.base import Columns, Mapping, month_start
 VERSION_MARKERS: list[tuple[str, tuple[str, ...]]] = [
     ("1.3", ("service_provider_name", "host_provider_name", "contract_applied")),
     ("1.2", ("invoice_id", "pricing_currency", "billing_account_type", "sub_account_type")),
-    ("1.1", ("charge_class", "sku_meter", "service_subcategory", "capacity_reservation_id")),
+    ("1.1", ("sku_meter", "service_subcategory", "capacity_reservation_id", "capacity_reservation_status")),
     ("1.0", ("billed_cost", "effective_cost", "charge_period_start")),
 ]
 

@@ -193,15 +193,7 @@ class Workspace:
         issues: list[str] = []
         try:
             if src.fmt == "parquet":
-                schema = self.con.execute(f"DESCRIBE SELECT * FROM read_parquet({path})").fetchall()
-                exprs = []
-                for name, typ, *_ in schema:
-                    q = quote_ident(name)
-                    if any(k in typ.upper() for k in ("MAP(", "STRUCT(", "[]", "LIST")):
-                        exprs.append(f"CAST(to_json({q}) AS VARCHAR) AS {q}")
-                    else:
-                        exprs.append(f"CAST({q} AS VARCHAR) AS {q}")
-                select = ", ".join(exprs)
+                select = ", ".join(self._parquet_columns(path))
                 self.con.execute(
                     f"CREATE TABLE {table} AS SELECT row_number() OVER () AS __cl_row, {select} "
                     f"FROM read_parquet({path})"
@@ -249,6 +241,32 @@ class Workspace:
         elif name is not None:
             mapping = ADAPTERS[name].build(cols)
         return LoadedSource(src, table, rows, cols.original, name, score, mapping, basis_evidence, issues)
+
+    def _parquet_columns(self, path: str) -> list[str]:
+        """VARCHAR projections for a Parquet file.
+
+        STRUCT columns are flattened into dotted names (``service.description``), matching
+        the flattened CSV spelling, because BigQuery and other warehouses keep billing
+        records nested. LIST and MAP columns become JSON text (GCP ``credits``, ``labels``;
+        CUR 2.0 ``resource_tags``).
+        """
+        out: list[str] = []
+
+        def visit(expr: str, name: str, typ: str) -> None:
+            t = typ.upper().strip()
+            if t.endswith("]") or t.startswith(("MAP(", "LIST", "UNION(")):
+                out.append(f"CAST(to_json({expr}) AS VARCHAR) AS {quote_ident(name)}")
+            elif t.startswith("STRUCT("):
+                fields = self.con.execute(
+                    f"DESCRIBE SELECT unnest({expr}) FROM read_parquet({path}) LIMIT 0").fetchall()
+                for child, ctyp, *_ in fields:
+                    visit(f"struct_extract({expr}, {sql_str(child)})", f"{name}.{child}", ctyp)
+            else:
+                out.append(f"CAST({expr} AS VARCHAR) AS {quote_ident(name)}")
+
+        for name, typ, *_ in self.con.execute(f"DESCRIBE SELECT * FROM read_parquet({path})").fetchall():
+            visit(quote_ident(name), name, typ)
+        return out
 
     def _root_of(self, path: Path) -> Path:
         for root in sorted(self.discovery.roots, key=lambda r: len(str(r)), reverse=True):

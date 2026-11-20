@@ -18,6 +18,16 @@ def D(v) -> Decimal:
     return Decimal(0) if v is None else v if isinstance(v, Decimal) else Decimal(str(v))
 
 
+def owner_label(owner: dict | None) -> str:
+    """Never present an account name as if it were a confirmed owner."""
+    owner = owner or {}
+    if owner.get("status") == "tag":
+        return f"{owner.get('key')}={owner.get('value')}"
+    if owner.get("status") == "account":
+        return f"unattributed (route via account {owner.get('value')})"
+    return "unattributed"
+
+
 def safe_cell(value: object) -> str:
     """OWASP CSV injection: prefix text that a spreadsheet would execute as a formula."""
     text = "" if value is None else str(value)
@@ -55,6 +65,9 @@ def audit_text(report: dict) -> str:
     lines = [f"CloudLeak audit · {len(report['inputs'])} file(s) · run {report['run']['report_run_id']}"]
     if report.get("synthetic_data"):
         lines.append("SYNTHETIC TEST DATA")
+    if report.get("doctor") and report["doctor"]["counts"]["FAIL"]:
+        lines.append(f"TOTALS MAY BE WRONG: {report['doctor']['counts']['FAIL']} data-quality check(s) failed; "
+                     "run `cloudleak doctor` and fix the inputs first.")
     for p in report["periods"]:
         if p["finality"] == "preliminary_estimate":
             lines.append(f"PRELIMINARY: {p['provider']} {p['billing_period']}: {p['reason']}")
@@ -107,7 +120,7 @@ def markdown(report: dict) -> str:
             "Observed cost is what was billed, not a saving. Verify before acting.", "",
             "| Rule | Provider | Period | Resource / scope | Observed | Owner |", "|---|---|---|---|---:|---|"]
     for f in sig[:100]:
-        owner = (f.get("owner_routing") or {}).get("value") or "unattributed"
+        owner = owner_label(f.get("owner_routing"))
         out.append(f"| {f['rule_id']} {md(f['title'])} | {f['provider']} | {f['billing_period']} | "
                    f"`{md(f.get('resource_id') or f.get('sub_account_id') or '-')}` | "
                    f"{display(D(f['financials']['observed_cost']), f['currency'])} | {md(owner)} |")

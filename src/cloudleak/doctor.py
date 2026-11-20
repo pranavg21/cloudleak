@@ -65,6 +65,9 @@ CATALOG: list[CheckSpec] = [
               "Identical line items in two different files indicate overlapping exports and double counting."),
     CheckSpec("CL-ACC-007", "Billed versus effective cost", "accounting",
               "Difference between billed and amortized (effective) cost, where both are present."),
+    CheckSpec("CL-ACC-008", "Every export covers every period", "accounting",
+              "A provider or billing account with no rows in a period that other exports cover. Comparisons "
+              "across that period would mistake a missing file for a change in spend."),
     CheckSpec("CL-DQ-001", "Resource identifiers present", "data_quality",
               "Share of usage cost carrying a resource ID; exports without resource IDs cannot support "
               "resource-level findings."),
@@ -160,12 +163,17 @@ def run_doctor(ws: Workspace) -> DoctorReport:
         else:
             m = s.mapping
             label = m.dataset + (f" (FOCUS {m.focus_version})" if m.focus_version else "")
-            status = "WARN" if m.cost_basis == "unknown" else "PASS"
+            status = "WARN" if m.cost_basis == "unknown" or s.rows == 0 else "PASS"
+            if s.rows == 0:
+                m.notes.append("The file has a header but no data rows.")
             add(CheckResult("CL-ING-001", status,
                             f"{label}; {s.rows:,} rows; cost basis: {m.cost_basis}"
                             + (f" (from {s.basis_evidence})" if s.basis_evidence else "") + ".",
                             _src_name(s), " ".join(m.notes) or None,
                             {"dataset": m.dataset, "rows": s.rows, "cost_basis": m.cost_basis}))
+    if ws.sources and sum(s.rows for s in ws.sources) == 0:
+        add(CheckResult("CL-ING-001", "FAIL", "No data rows in any input file; there is nothing to audit.",
+                        remediation="Check that the export finished and that you passed the data files."))
     for name, reason in ws.discovery.skipped:
         add(CheckResult("CL-ING-001", "INFO", f"Skipped: {reason}.", name))
 
@@ -301,24 +309,48 @@ def run_doctor(ws: Workspace) -> DoctorReport:
     else:
         add(CheckResult("CL-ACC-005", "INFO", "Only usage charges present (no tax, credit, refund or fee rows)."))
 
+    # Identical line items in different files: overlapping deliveries. When at least half of a file
+    # reappears elsewhere, it is a duplicated delivery and totals are wrong -> FAIL.
     overlap = ws.rows("""
-        SELECT provider, count(*) AS keys, list_sort(list_distinct(flatten(list(sids)))) AS sources FROM (
-          SELECT provider, list(DISTINCT source_id) AS sids
-          FROM valid
-          GROUP BY provider, billing_account_id, sub_account_id, resource_id, sku, sku_detail, charge_raw,
-                   charge_start, charge_end, cost, usage_quantity, invoice_id, cost_basis, region
-          HAVING count(DISTINCT source_id) > 1
-        ) GROUP BY 1 ORDER BY 1""")
+        WITH k AS (
+          SELECT source_id, provider,
+                 hash(provider, billing_account_id, sub_account_id, resource_id, sku, sku_detail, charge_raw,
+                      charge_start, charge_end, cost, usage_quantity, invoice_id, cost_basis, region) AS h
+          FROM valid),
+        c AS (SELECT h, count(DISTINCT source_id) AS ns FROM k GROUP BY h)
+        SELECT k.source_id, any_value(provider) AS provider, count(*) AS n,
+               count(*) FILTER (WHERE ns > 1) AS dup, count(DISTINCT h) FILTER (WHERE ns > 1) AS keys
+        FROM k JOIN c USING (h) GROUP BY 1 HAVING count(*) FILTER (WHERE ns > 1) > 0 ORDER BY 1""")
     if overlap:
         for r in overlap:
-            files = ", ".join(names[i] for i in r["sources"][:6])
-            add(CheckResult("CL-ACC-006", "WARN",
-                            f"{r['keys']:,} line items appear identically in more than one file ({files}). "
-                            "Overlapping deliveries double count.",
-                            r["provider"], "Keep only the latest delivery for each billing period.",
-                            {"duplicated_line_items": r["keys"]}))
+            share = r["dup"] / r["n"]
+            status = "FAIL" if share >= 0.5 else "WARN"
+            add(CheckResult("CL-ACC-006", status,
+                            f"{r['dup']:,} of {r['n']:,} rows ({share:.0%}) also appear identically in another file."
+                            + (" This file duplicates another delivery; totals count it twice."
+                               if status == "FAIL" else " Overlapping deliveries double count."),
+                            names[r["source_id"]], "Keep only the latest delivery for each billing period.",
+                            {"duplicated_rows": r["dup"], "duplicated_line_items": r["keys"], "rows": r["n"]}))
     else:
         add(CheckResult("CL-ACC-006", "PASS", "No line item appears in more than one file."))
+
+    principal = ws.rows("""SELECT provider, billing_account_id, cost_basis,
+                                  list(DISTINCT billing_period ORDER BY billing_period) AS periods
+                           FROM valid WHERE strftime(charge_date, '%Y-%m') = billing_period GROUP BY ALL""")
+    all_periods = sorted({p for r in principal for p in r["periods"]})
+    gaps = 0
+    for r in principal:
+        missing = [p for p in all_periods if p not in r["periods"]]
+        if missing:
+            gaps += 1
+            add(CheckResult("CL-ACC-008", "WARN",
+                            f"No rows for {', '.join(missing)}, which other exports cover. Totals and "
+                            "month-over-month comparisons for those periods omit this scope.",
+                            f"{r['provider']} {r['billing_account_id'] or ''} ({r['cost_basis']})".replace("  ", " "),
+                            "Supply the missing export, or compare only periods every scope covers."))
+    if principal and not gaps:
+        add(CheckResult("CL-ACC-008", "PASS", f"Every provider and billing account covers all "
+                        f"{len(all_periods)} period(s)."))
 
     eff = ws.rows("""SELECT provider, billing_period, currency, sum(cost) AS billed, sum(effective_cost) AS eff
                      FROM valid WHERE cost_basis = 'billed' GROUP BY ALL
@@ -489,7 +521,18 @@ def run_doctor(ws: Workspace) -> DoctorReport:
     return DoctorReport(out)
 
 
+def _tail2(text: str) -> str:
+    parts = [p for p in text.replace("\\", "/").split("/") if p]
+    return "/".join(parts[-2:])
+
+
 def _manifest_checks(ws: Workspace, add) -> None:
+    """Completeness and staleness of manifest-described deliveries.
+
+    A provider manifest names the files of exactly one delivery. Files are matched on
+    their last two path components (``<assembly or run id>/<file>``), so a file from an
+    older assembly or export run with the same file name is *not* mistaken for a listed one.
+    """
     manifests = ws.discovery.manifests
     if not manifests:
         add(CheckResult("CL-ING-003", "INFO",
@@ -497,28 +540,72 @@ def _manifest_checks(ws: Workspace, add) -> None:
                         remediation="Include the export's manifest JSON alongside the data files."))
         add(CheckResult("CL-ING-004", "SKIP", "No manifest row counts to compare."))
         return
-    present = {s.file.path.name: s for s in ws.sources}
+    sources = list(ws.sources)
+    by_tail = {f"{s.file.path.parent.name}/{s.file.path.name}": s for s in sources}
+
+    def owned(m) -> list:
+        """Sources this manifest lists."""
+        tails = {_tail2(k) for k in m.keys}
+        out = [s for t, s in by_tail.items() if t in tails]
+        flat = [s for s in by_base_items(m) if s not in out]
+        return out + flat
+
+    def by_base_items(m):
+        names = set(m.files)
+        return [s for s in sources if s.file.path.parent == m.path.parent and s.file.path.name in names]
+
+    claimed: dict[int, list] = defaultdict(list)
     for m in manifests:
-        listed = set(m.files)
-        missing = sorted(listed - set(present))
-        here = {name for name, s in present.items() if s.file.path.parent == m.path.parent}
-        extra = sorted(here - listed) if listed else []
+        listed = owned(m)
+        for s in listed:
+            claimed[s.file.source_id].append(m)
         scope = m.path.name
+        found_tails = {f"{s.file.path.parent.name}/{s.file.path.name}" for s in listed}
+        found_bases = {s.file.path.name for s in listed}
+        missing = [k for k in m.keys if _tail2(k) not in found_tails and k.rsplit("/", 1)[-1] not in found_bases]
         if missing:
             add(CheckResult("CL-ING-003", "FAIL", f"{len(missing)} file(s) listed in the manifest are missing: "
-                            f"{', '.join(missing[:5])}.", scope,
+                            f"{', '.join(k.rsplit('/', 1)[-1] for k in missing[:5])}.", scope,
                             "Download the complete delivery; totals from a partial delivery understate spend.",
-                            {"missing": missing}))
-        elif listed:
-            add(CheckResult("CL-ING-003", "PASS", f"All {len(listed)} listed file(s) present.", scope))
-        if extra:
-            add(CheckResult("CL-ING-003", "WARN", f"{len(extra)} data file(s) beside the manifest are not listed in "
-                            f"it: {', '.join(extra[:5])}. They may belong to an older delivery.", scope))
+                            {"missing": [k.rsplit("/", 1)[-1] for k in missing]}))
+        elif m.keys:
+            add(CheckResult("CL-ING-003", "PASS", f"All {len(m.keys)} listed file(s) present.", scope))
         if m.row_counts:
-            mism = [(n, c, present[n].rows) for n, c in m.row_counts.items() if n in present and present[n].rows != c]
+            mism = [(s.file.path.name, m.row_counts[s.file.path.name], s.rows) for s in listed
+                    if s.file.path.name in m.row_counts and m.row_counts[s.file.path.name] != s.rows]
             if mism:
                 add(CheckResult("CL-ING-004", "FAIL", "; ".join(f"{n}: manifest {c:,} rows, read {r:,}"
                                                                 for n, c, r in mism[:5]), scope,
                                 "The file is truncated or from a different run than the manifest."))
             else:
                 add(CheckResult("CL-ING-004", "PASS", "Row counts match the manifest.", scope))
+
+    # Files inside a manifest's delivery folder that no manifest lists: older assemblies / runs.
+    stale = []
+    for m in manifests:
+        if m.kind == "unknown":
+            continue
+        root = m.path.parent
+        for s in sources:
+            if s.file.source_id in claimed:
+                continue
+            if root in s.file.path.parents:
+                stale.append((m, s))
+    for m, s in stale:
+        add(CheckResult("CL-ING-003", "FAIL",
+                        f"{s.file.path.parent.name}/{s.file.path.name} sits inside the delivery folder of "
+                        f"{m.path.name} but is not listed in it: it belongs to an older delivery and double counts.",
+                        s.file.display_name, "Delete files not listed in the current manifest, or pass only the "
+                        "files the manifest lists."))
+
+    # Two complete deliveries of the same export and period.
+    groups: dict[tuple, list] = defaultdict(list)
+    for m in manifests:
+        if m.kind != "unknown" and m.billing_period and any(m in claimed[i] for i in claimed):
+            groups[(m.kind, m.identity, m.billing_period, str(m.path.parent.parent))].append(m)
+    for (kind, _ident, period, _root), ms in groups.items():
+        if len(ms) > 1:
+            add(CheckResult("CL-ING-003", "FAIL",
+                            f"{len(ms)} deliveries of the same {kind} export for {period} are present "
+                            f"({', '.join(str(x.path.parent.name) for x in ms[:4])}); every row would be counted "
+                            f"{len(ms)} times.", period, "Keep only the latest delivery (newest manifest)."))

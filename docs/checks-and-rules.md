@@ -19,6 +19,7 @@ Generated from `cloudleak checks`. IDs are stable and never reused, so CI can ga
 | `CL-ACC-005` | accounting | Charge composition | Tax, credits, refunds, discounts, fees and purchases are separated from usage. |
 | `CL-ACC-006` | accounting | No overlapping deliveries | Identical line items in two different files indicate overlapping exports and double counting. |
 | `CL-ACC-007` | accounting | Billed versus effective cost | Difference between billed and amortized (effective) cost, where both are present. |
+| `CL-ACC-008` | accounting | Every export covers every period | A provider or billing account with no rows in a period that other exports cover. Comparisons across that period would mistake a missing file for a change in spend. |
 | `CL-DQ-001` | data_quality | Resource identifiers present | Share of usage cost carrying a resource ID; exports without resource IDs cannot support resource-level findings. |
 | `CL-DQ-002` | data_quality | Tag and label coverage | Share of usage cost carrying any tag or label. |
 | `CL-DQ-003` | data_quality | Consistent tag keys | Tag keys that differ only by case or prefix (env, ENV, Environment) split ownership reports. |
@@ -43,7 +44,7 @@ Statuses: **PASS** the property holds · **INFO** a fact worth knowing · **WARN
 | --- | --- | --- | --- |
 | `CL-SIG-001` | Idle public IPv4 address charges | aws | AWS bills idle addresses under an explicit IdleAddress usage type; the charge itself records that the address was allocated but not associated during the billed hours. |
 | `CL-SIG-002` | NAT gateway data-processing charges | aws, azure, gcp, focus | Per-GB NAT processing is billed on every byte routed through the gateway, including traffic to the provider's own storage and database services that could use private endpoints instead. |
-| `CL-SIG-003` | Inter-zone data transfer charges | aws, gcp | Bytes moving between availability zones are billed in each direction; chatty services split across zones generate this cost silently. |
+| `CL-SIG-003` | Regional (inter-zone) data transfer charges | aws, gcp | AWS bills DataTransfer-Regional-Bytes for traffic between availability zones (in each direction) and for same-region traffic over public or Elastic IPs; GCP bills inter-zone egress. Chatty services split across zones generate this cost silently. |
 | `CL-SIG-004` | Log ingestion charges | aws, azure, gcp, focus | Log ingestion is billed per GB written, independent of whether anyone queries the logs. |
 | `CL-SIG-005` | Snapshot storage charges | aws, azure, gcp, focus | Snapshot storage accumulates silently; the bill shows how much is retained, not whether it is needed. |
 | `CL-SIG-006` | Unused commitment charges | aws, azure, gcp, focus | The bill explicitly attributes this amount to commitment capacity that no usage consumed. |
