@@ -194,9 +194,12 @@ Python 3.13, DuckDB 2.0.1, default `--memory-limit 2GB`:
 | --- | --- | --- | --- | --- | --- |
 | 1,000,000 | 394 MB | 26 MB | 10 s | 11 s | 1.6 GB |
 | 3,000,000 | 1.24 GB | 78 MB | 29 s | 31 s | 2.1 GB |
+| 10,000,000 | ~4.1 GB | 259 MB | 79 s | 100 s | 2.4 GB |
 
-Memory is bounded by `--memory-limit`, not by file size; DuckDB spills to `--temp-dir` beyond it. Run the
-script on your hardware before you rely on these numbers.
+Memory is bounded by `--memory-limit`, not by file size; DuckDB spills to `--temp-dir` beyond it (about
+1.4 GB of spill at 10M rows). `redact` is slower because every cell passes through the scrubber and the
+residual scan: about 2 minutes per million rows of this shape. Inputs above ~4 GB uncompressed have not been
+measured. Run the script on your hardware before you rely on these numbers.
 
 ## Air-gapped and container use
 

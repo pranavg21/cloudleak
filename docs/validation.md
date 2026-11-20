@@ -60,5 +60,5 @@ reason [schema quirk reports](https://github.com/pranavg21/cloudleak/issues/new?
 ## Not yet tested
 
 - Real customer exports from any provider (see top).
-- Inputs above 4 GB uncompressed (see the performance table in the README for what was measured).
+- Inputs above ~4.1 GB uncompressed (10M rows were measured: README performance table).
 - Windows paths with network shares; inputs on read-only network filesystems.
