@@ -27,7 +27,7 @@ from cloudleak.analysis import finality_lookup, owner_routing, period_statuses
 from cloudleak.engine import Workspace
 from cloudleak.findings import Finding, VerificationStep
 
-RULE_PACK_VERSION = "2026.11.0"
+RULE_PACK_VERSION = "2026.11.1"
 Q = shlex.quote
 
 
@@ -242,19 +242,21 @@ RULES: list[Rule] = [
         _verify_nat,
     ),
     Rule(
-        "CL-SIG-003", "cross-zone-transfer", "Inter-zone data transfer charges",
+        "CL-SIG-003", "cross-zone-transfer", "Regional (inter-zone) data transfer charges",
         """(provider = 'aws' AND sku ILIKE '%DataTransfer-Regional-Bytes%')
            OR (provider = 'gcp' AND sku ILIKE '%Inter Zone%')""",
         "scope",
-        "Bytes moving between availability zones are billed in each direction; chatty services split across "
-        "zones generate this cost silently.",
+        "AWS bills DataTransfer-Regional-Bytes for traffic between availability zones (in each direction) and "
+        "for same-region traffic over public or Elastic IPs; GCP bills inter-zone egress. Chatty services split "
+        "across zones generate this cost silently.",
         ("Which services exchange the traffic", "Whether the cross-zone traffic is required for availability"),
         ("Replication or quorum traffic that exists for high availability",),
         _verify_cross_zone, severity="low", providers=("aws", "gcp"),
     ),
     Rule(
         "CL-SIG-004", "log-ingestion", "Log ingestion charges",
-        """(provider = 'aws' AND service ILIKE 'AmazonCloudWatch' AND sku ILIKE '%DataProcessing-Bytes%')
+        """(provider = 'aws' AND service ILIKE 'AmazonCloudWatch'
+                AND (sku ILIKE '%DataProcessing-Bytes%' OR sku ILIKE '%VendedLog-Bytes%'))
            OR (provider = 'azure' AND service ILIKE '%Log Analytics%' AND sku ILIKE '%Ingestion%')
            OR (provider = 'gcp' AND service ILIKE '%Logging%' AND sku ILIKE '%Log Volume%')""",
         "scope",

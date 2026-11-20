@@ -36,25 +36,22 @@ by the published JSON Schema.
 
 ## Install
 
-Python 3.10 or newer. The PyPI distribution is **`cloudleak-cli`**; the command is `cloudleak`.
-
-```bash
-pipx install cloudleak-cli
-```
-
-or with uv:
-
-```bash
-uv tool install cloudleak-cli
-```
-
-Until the first PyPI release, install from GitHub:
+Python 3.10 or newer. The command is `cloudleak`.
 
 ```bash
 pipx install git+https://github.com/pranavg21/cloudleak
 ```
 
-> The PyPI project named `cloudleak` (without `-cli`) is an unrelated package. Install `cloudleak-cli`.
+or with uv:
+
+```bash
+uv tool install git+https://github.com/pranavg21/cloudleak
+```
+
+Once 0.1.0 is released, the PyPI distribution will be **`cloudleak-cli`** (`pipx install cloudleak-cli`).
+Releases are published only by this repository's release workflow, with provenance you can verify
+(see [SECURITY.md](SECURITY.md#supply-chain)). The PyPI project named `cloudleak` (without `-cli`) is an
+unrelated package.
 
 To run with no network at all, see [Air-gapped and container use](#air-gapped-and-container-use).
 
@@ -237,6 +234,7 @@ or done well by others (OpenCost, Infracost, OpenOps, focus_validator, native cl
 intended to stay stable; breaking changes will bump the schema version. The earlier Next.js / FastAPI
 prototype was retired in favor of this CLI; it is preserved in git history at commit `489fbff`.
 
+[docs/validation.md](docs/validation.md) lists, export by export, what is tested and what is not.
 Validation so far uses synthetic fixtures with exact ground truth plus adversarial cases (attached disks,
 in-use IPs, GPUs, refunds, identical Azure rows, preliminary months, hostile tags, malformed files). It
 has not yet been evaluated on independently labeled production exports. If you run it on real exports,

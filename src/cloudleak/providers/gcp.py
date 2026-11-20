@@ -35,7 +35,8 @@ def credits_sum_sql(expr: str) -> str:
 
 def build(cols: Columns) -> Mapping:
     c = cols
-    gross = c.money("cost")
+    cost_col = "unrounded_cost" if c.has("unrounded_cost") else "cost"
+    gross = c.money(cost_col)
     if c.has("credits"):
         cr = c.text("credits")
         credits = f"CASE WHEN {cr} IS NOT NULL AND json_valid({cr}) THEN {credits_sum_sql(cr)} ELSE 0 END"
@@ -46,7 +47,7 @@ def build(cols: Columns) -> Mapping:
     net = f"({gross} + {credits})"
 
     inv = c.text("invoice_month")
-    usage_start = c.ts("usage_start_time")
+    usage_start = c.ts("usage_start_time", "usage_start_date")
     period = (
         f"COALESCE(TRY_CAST(strptime({inv}, '%Y%m') AS DATE), {month_start(usage_start)})"
         if inv != "CAST(NULL AS VARCHAR)" else month_start(usage_start)
@@ -70,7 +71,7 @@ def build(cols: Columns) -> Mapping:
         provider="gcp",
         dataset="gcp_detailed" if detailed else "gcp_standard",
         cost_basis="billed",
-        cost_raw=c.text("cost"),
+        cost_raw=c.text(cost_col),
         cost=net,
         gross_cost=gross,
         effective_cost=net,
@@ -82,7 +83,7 @@ def build(cols: Columns) -> Mapping:
         "CAST(NULL AS VARCHAR)",
         billing_period_start=period,
         charge_start=usage_start,
-        charge_end=c.ts("usage_end_time"),
+        charge_end=c.ts("usage_end_time", "usage_end_date"),
         currency=c.text("currency"),
         charge_raw=cost_type,
         charge_category=(

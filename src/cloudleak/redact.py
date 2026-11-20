@@ -31,10 +31,10 @@ back locally.
 from __future__ import annotations
 
 import base64
+import contextlib
 import csv
 import hashlib
 import hmac
-import io
 import json
 import os
 import re
@@ -68,12 +68,14 @@ NUMERIC_RE = re.compile(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?
 PATTERN_KIND = {"arn": "arn", "email": "email", "guid": "guid", "ipv4": "ip", "aws_account": "acct"}
 
 # ---------------------------------------------------------------- registry
-DROP_EXACT = {"additional_info", "x_additional_info", "service_info1", "service_info2", "product_comment"}
+DROP_EXACT = {"additional_info", "x_additional_info", "service_info1", "service_info2", "product_comment",
+              "project_ancestors"}  # GCP folder/org display names
 TAG_EXACT = {"tags", "resource_tags", "labels", "project_labels", "system_labels", "cost_category",
-             "x_tags", "resource_labels"}
+             "x_tags", "resource_labels", "x_cost_categories", "cost_categories"}
 TAG_PREFIXES = ("resource_tags_", "cost_category_", "user_", "tag_", "label_")
 TEXT_EXACT = {"line_item_line_item_description", "charge_description", "credits", "product", "sku_price_details",
-              "x_sku_description", "adjustment_info_description", "line_item_description"}
+              "x_sku_description", "adjustment_info_description", "line_item_description", "x_discounts",
+              "discount"}
 SAFE_EXACT = {
     "service_name", "service_category", "service_subcategory", "provider_name", "publisher_name",
     "invoice_issuer_name", "service_provider_name", "host_provider_name", "region_id", "region_name", "region",
@@ -89,7 +91,8 @@ SAFE_EXACT = {
     "capacity_reservation_status", "billing_account_type", "sub_account_type", "identity_time_interval",
     "bill_billing_entity", "bill_invoicing_entity", "line_item_legal_entity", "bill_bill_type",
     "is_azure_credit_eligible", "chargeback_type", "date", "usage_date", "billing_period_start_date",
-    "billing_period_end_date", "pricing_term", "product_servicecode", "product_region_code",
+    "billing_period_end_date", "pricing_term", "product_servicecode", "product_region_code", "part_number",
+    "adjustment_info_mode", "service_period_start_date", "service_period_end_date", "exchange_rate_date",
 }
 PSEUDO_TOKENS = re.compile(
     r"account|subscription|project_id|project_name|project_number|ancestry|resource_id|resource_name"
@@ -168,9 +171,15 @@ def load_key(path: Path | None, *, create: bool) -> tuple[bytes, Path]:
     if not create:
         raise InputError(f"{path}: redaction key not found", hint="Pass --key-file pointing at the key used to redact.")
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="ascii") as fh:
-        fh.write(secrets.token_bytes(32).hex() + "\n")
+    fd, tmp = tempfile.mkstemp(prefix=".key-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as fh:
+            fh.write(secrets.token_bytes(32).hex() + "\n")
+        os.chmod(tmp, 0o600)
+        with contextlib.suppress(FileExistsError):  # another process created the key first: use theirs
+            os.link(tmp, path)  # atomic publish of a fully written key
+    finally:
+        Path(tmp).unlink(missing_ok=True)
     gitignore = path.parent / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text("*\n", encoding="ascii")
@@ -236,21 +245,85 @@ class RedactionReport:
         }
 
 
+TOKEN_RE = re.compile(r"[A-Za-z0-9_.:/@+=-]+")
+PART_SPLIT = re.compile(r"([/:=@,.])")
+RESIDUAL_ARN = re.compile(r"arn:aws[a-z-]*:", re.IGNORECASE)
+
+
+class KnownIndex:
+    """Case-insensitive index of original identifiers, matched per token rather than by regex alternation.
+
+    Whole tokens and their parts (split on ``/ : = @ , .``) are looked up in a dict, so cost
+    grows with text length, not with the number of identifiers. Identifiers containing spaces
+    (display names) go through a small case-insensitive alternation.
+    """
+
+    def __init__(self, known: dict[str, str]):
+        self.map: dict[str, str] = {}
+        phrases: dict[str, str] = {}
+        for value, alias in known.items():
+            low = value.lower()
+            if any(ch.isspace() for ch in value):
+                phrases.setdefault(low, alias)
+            else:
+                self.map.setdefault(low, alias)
+        ordered = sorted(phrases, key=len, reverse=True)[:5000]
+        self.phrases = phrases
+        self.phrase_re = (re.compile("|".join(re.escape(p) for p in ordered), re.IGNORECASE)
+                          if ordered else None)
+
+    def __bool__(self) -> bool:
+        return bool(self.map or self.phrases)
+
+    def _token(self, tok: str) -> str:
+        hit = self.map.get(tok.lower())
+        if hit is not None:
+            return hit
+        pieces = PART_SPLIT.split(tok)
+        if len(pieces) == 1:
+            return tok
+        changed = False
+        for i in range(0, len(pieces), 2):
+            alias = self.map.get(pieces[i].lower())
+            if alias is not None:
+                pieces[i] = alias
+                changed = True
+        return "".join(pieces) if changed else tok
+
+    def sub(self, text: str) -> str:
+        if self.map:
+            text = TOKEN_RE.sub(lambda m: self._token(m.group(0)), text)
+        if self.phrase_re is not None:
+            text = self.phrase_re.sub(lambda m: self.phrases[m.group(0).lower()], text)
+        return text
+
+    def contains(self, text: str) -> bool:
+        if self.map:
+            for m in TOKEN_RE.finditer(text):
+                tok = m.group(0).lower()
+                if tok in self.map or any(p in self.map for p in PART_SPLIT.split(tok)[::2]):
+                    return True
+        return self.phrase_re is not None and self.phrase_re.search(text) is not None
+
+
 class _Scrubber:
-    """Replaces identifier patterns and known sensitive literals in text with aliases."""
+    """Replaces identifiers in free text with the same aliases used in structured columns.
+
+    Order matters: whole structured identifiers (ARNs, e-mails, GUIDs, IPs) are aliased first,
+    so replacing an account ID can never break an ARN apart and leave its resource name behind.
+    """
+
+    FIRST = ("arn", "email", "guid", "ipv4")
 
     def __init__(self, aliaser: Aliaser, known: dict[str, str]):
         self.aliaser = aliaser
-        self.known = known  # original value -> alias
-        lits = sorted((v for v in known if len(v) >= 6), key=len, reverse=True)[:50000]
-        self.literal_re = re.compile("|".join(re.escape(v) for v in lits)) if lits else None
+        self.index = KnownIndex(known)
 
     def __call__(self, text: str) -> str:
-        if self.literal_re is not None:
-            text = self.literal_re.sub(lambda m: self.known[m.group(0)], text)
-        for name, pat in PATTERNS.items():
-            text = pat.sub(lambda m, k=PATTERN_KIND[name]: self.aliaser.alias(k, m.group(0)), text)
-        return text
+        for name in self.FIRST:
+            text = PATTERNS[name].sub(lambda m, k=PATTERN_KIND[name]: self.aliaser.alias(k, m.group(0)), text)
+        text = self.index.sub(text)
+        return PATTERNS["aws_account"].sub(lambda m: self.aliaser.alias("acct", m.group(0)), text)
 
 
 def _tags(value: str, aliaser: Aliaser, scrub: _Scrubber) -> str:
@@ -336,7 +409,18 @@ def redact(paths: list[str], output: str, *, key_file: str | None = None, drop_u
                     v = str(v).strip()
                     if identifier_like(v):
                         known.setdefault(v, aliaser.alias(kind, v))
-        for v in safe_values & set(known):
+            for c, action in plan.items():
+                if action != "TAGS":
+                    continue
+                for (v,) in ws.con.execute(
+                        f"SELECT DISTINCT {quote_ident(c)} FROM {quote_ident(s.table)} "
+                        f"WHERE {quote_ident(c)} IS NOT NULL").fetchall():
+                    for tv in _tag_values(str(v)):
+                        tv = tv.strip()
+                        if identifier_like(tv):
+                            known.setdefault(tv, aliaser.alias("tag", tv))
+        safe_lower = {v.lower() for v in safe_values}
+        for v in [k for k in known if k.lower() in safe_lower]:
             del known[v]
         scrub = _Scrubber(aliaser, known)
 
@@ -418,40 +502,51 @@ def _json_strings(obj) -> list[str]:
 
 
 def scan_bundle(bundle: Path, known: dict[str, str]) -> int:
-    """Gate 3. Raises RedactionLeakError (never printing the value) on any residual identifier."""
-    lits = sorted((v for v in known if len(v) >= 6), key=len, reverse=True)[:50000]
-    literal_re = re.compile("|".join(re.escape(v) for v in lits)) if lits else None
-    exact = set(known)
+    """Gate 3. Re-reads every output file; raises RedactionLeakError (never printing a value) on any hit.
+
+    Checks each text cell for identifier patterns, any leftover ``arn:aws`` prefix, and any original
+    identifier (case-insensitive, as a whole token or a path/ARN part). Files are streamed.
+    """
+    index = KnownIndex(known)
     hits: dict[str, int] = {}
     cells = 0
+
+    def hit(key: str) -> None:
+        hits[key] = hits.get(key, 0) + 1
+
+    def check(fname: str, col: str, cell: str) -> None:
+        probe = ALIAS_TOKEN_RE.sub(" ", cell)
+        if index and index.contains(probe):
+            hit(f"{fname}:{col}:known-identifier")
+        if RESIDUAL_ARN.search(probe):
+            hit(f"{fname}:{col}:arn")
+        for name, pat in PATTERNS.items():
+            if pat.search(probe):
+                hit(f"{fname}:{col}:{name}")
+
     for path in sorted(bundle.iterdir()):
-        text = path.read_text(encoding="utf-8")
         if path.suffix == ".json":
-            # Scan every string in the report except hash digests (a random hex digest can start
-            # with twelve decimal digits and look like an AWS account ID).
-            rows = [[v] for v in _json_strings(json.loads(text)) if not HEX_DIGEST_RE.match(v)]
-            header = ["report"]
-        else:
-            reader = csv.reader(io.StringIO(text, newline=""))
-            header = next(reader, [])
-            rows = reader
-        numeric = [is_numeric_column(h) for h in header]
-        for row in rows:
-            for i, cell in enumerate(row):
+            # Every string except hash digests (a hex digest can start with twelve decimal digits).
+            for v in _json_strings(json.loads(path.read_text(encoding="utf-8"))):
                 cells += 1
-                if not cell or ALIAS_RE.match(cell):
-                    continue
-                col = header[i] if i < len(header) else "?"
-                if i < len(numeric) and numeric[i] and NUMERIC_RE.match(cell):
-                    continue
-                probe = ALIAS_TOKEN_RE.sub(" ", cell)
-                if cell in exact or (literal_re is not None and literal_re.search(probe)):
-                    hits[f"{path.name}:{col}:known-identifier"] = hits.get(
-                        f"{path.name}:{col}:known-identifier", 0) + 1
-                for name, pat in PATTERNS.items():
-                    if pat.search(probe):
-                        k = f"{path.name}:{col}:{name}"
-                        hits[k] = hits.get(k, 0) + 1
+                if v and not HEX_DIGEST_RE.match(v) and not ALIAS_RE.match(v):
+                    check(path.name, "report", v)
+            continue
+        with path.open(newline="", encoding="utf-8") as fh:
+            reader = csv.reader(fh)
+            header = next(reader, [])
+            numeric = [is_numeric_column(h) for h in header]
+            for h in header:
+                cells += 1
+                check(path.name, "header", h)
+            for row in reader:
+                for i, cell in enumerate(row):
+                    cells += 1
+                    if not cell or ALIAS_RE.match(cell):
+                        continue
+                    if i < len(numeric) and numeric[i] and NUMERIC_RE.match(cell):
+                        continue
+                    check(path.name, header[i] if i < len(header) else "?", cell)
     if hits:
         detail = "; ".join(f"{k} x{v}" for k, v in sorted(hits.items())[:20])
         raise RedactionLeakError(

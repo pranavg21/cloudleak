@@ -70,6 +70,7 @@ class Result:
     finality: str
     providers: list[str]
     notes: list[str] = field(default_factory=list)
+    invoices: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         e = self.expectation
@@ -86,6 +87,7 @@ class Result:
             "providers": self.providers,
             "excluded_other_currency": [{**x, "amount": fmt(x["amount"])} for x in self.excluded_other_currency],
             "excluded_amortized_rows": self.excluded_amortized_rows,
+            "invoices_in_scope": self.invoices,
             "notes": self.notes,
         }
 
@@ -154,6 +156,12 @@ def reconcile(ws: Workspace, expectations: list[Expectation], tolerance: Decimal
                 components["credits_included_in_usage"] = components.get("credits_included_in_usage", ZERO) + \
                     r["embedded"]
         diff = total - e.total
+        invoices = []
+        if not e.invoice_id:
+            invoices = ws.rows(f"""SELECT COALESCE(invoice_id, '(no invoice id)') AS invoice_id, sum(cost) AS amount,
+                                          count(*) AS rows
+                                   FROM valid WHERE {where} AND currency = ? AND cost_basis = 'billed'
+                                   GROUP BY 1 ORDER BY 1""", [*params, e.currency])
         periods = {p for p in ([e.period] if e.period else [])} or {
             r["billing_period"] for r in ws.rows(
                 f"SELECT DISTINCT billing_period FROM valid WHERE {where}", params)}
@@ -171,6 +179,11 @@ def reconcile(ws: Workspace, expectations: list[Expectation], tolerance: Decimal
             status = "difference"
         if finality == "preliminary_estimate":
             notes.append("The period is not finalized; charges can still post, so this comparison is provisional.")
+        real_invoices = [i for i in invoices if i["invoice_id"] != "(no invoice id)"]
+        if len(real_invoices) > 1:
+            notes.append(f"This scope spans {len(real_invoices)} invoices (" + ", ".join(
+                f"{i['invoice_id']} {fmt(i['amount'])}" for i in real_invoices[:6]) + "); an invoice total covers "
+                "one of them. Reconcile each with --invoice-id.")
         if status == "difference":
             notes.extend(_explanations(providers, components, diff, finality))
         if status == "match":
@@ -179,14 +192,17 @@ def reconcile(ws: Workspace, expectations: list[Expectation], tolerance: Decimal
             notes.append(f"{sum(o['rows'] for o in other):,} rows in other currencies were excluded, not converted.")
         if amortized:
             notes.append(f"{amortized:,} amortized-basis rows were excluded; invoices charge billed cost.")
-        results.append(Result(e, status, total, diff, n, components, other, amortized, finality, providers, notes))
+        res = Result(e, status, total, diff, n, components, other, amortized, finality, providers, notes)
+        res.invoices = [{"invoice_id": i["invoice_id"], "amount": fmt(i["amount"]), "rows": i["rows"]}
+                        for i in invoices]
+        results.append(res)
     return results
 
 
 def _explanations(providers: list[str], components: dict[str, Decimal], diff: Decimal,
                   finality: str) -> list[str]:
     out = []
-    if "tax" not in components:
+    if "tax" not in components and diff < 0:
         out.append("The export has no tax lines; if the invoice includes tax, the export will be lower by that "
                    "amount (Azure cost exports generally exclude tax).")
     if "aws" in providers and diff < 0 and finality != "finalized":
@@ -195,6 +211,9 @@ def _explanations(providers: list[str], components: dict[str, Decimal], diff: De
     if diff != 0 and abs(diff) < Decimal("0.05"):
         out.append("A sub-cent to few-cent difference is consistent with invoice-level rounding; compare with a "
                    "rounding tolerance (--tolerance) if your invoices round per line.")
+    if diff > 0:
+        out.append("The export is higher than the invoice: check for charges billed on a different invoice "
+                   "(for example AWS Marketplace, another billing entity or account) inside the same period.")
     out.append("Credits or refunds applied at invoice level, or charges from another billing account, also "
                "produce differences.")
     return out

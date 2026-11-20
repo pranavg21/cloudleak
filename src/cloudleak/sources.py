@@ -36,6 +36,8 @@ class Manifest:
     billing_period: str | None = None  # YYYY-MM
     declared_rows: int | None = None
     columns: list[str] = field(default_factory=list)
+    keys: list[str] = field(default_factory=list)  # full object keys as listed
+    identity: str = ""  # which export this manifest belongs to (report / export name and scope)
 
     def to_dict(self) -> dict:
         return {
@@ -146,32 +148,38 @@ def _parse_manifest(path: Path) -> Manifest | None:
         cols = [
             f"{c.get('category')}/{c.get('name')}" for c in doc.get("columns", []) if isinstance(c, dict)
         ]
+        keys = [str(k) for k in doc.get("reportKeys", [])]
+        ident = "|".join(str(doc.get(k, "")) for k in ("account", "reportName", "reportId"))
         return Manifest(
-            path, "aws_cur_legacy", sha, [base(k) for k in doc.get("reportKeys", [])],
+            path, "aws_cur_legacy", sha, [base(k) for k in keys], keys=keys, identity=ident,
             billing_period=_yyyymm(period), columns=cols,
         )
     # AWS Data Exports (CUR 2.0 / FOCUS) manifest: dataFiles + executionId
     if "dataFiles" in doc:
         period = (doc.get("billingPeriod") or {}).get("start")
         cols = [c.get("name") for c in doc.get("columns", []) if isinstance(c, dict) and c.get("name")]
+        keys = [str(k) for k in doc.get("dataFiles", [])]
+        ident = "|".join(str(doc.get(k, "")) for k in ("account", "exportArn", "exportName", "reportName"))
         return Manifest(
-            path, "aws_data_exports", sha, [base(k) for k in doc.get("dataFiles", [])],
+            path, "aws_data_exports", sha, [base(k) for k in keys], keys=keys, identity=ident,
             billing_period=_yyyymm(period), columns=cols,
         )
     # Azure Cost Management export manifest: blobs[] with dataRowCount
     if "blobs" in doc and isinstance(doc.get("blobs"), list):
-        files, counts = [], {}
+        files, counts, keys = [], {}, []
         for blob in doc["blobs"]:
             if not isinstance(blob, dict) or "blobName" not in blob:
                 continue
+            keys.append(str(blob["blobName"]))
             name = base(str(blob["blobName"]))
             files.append(name)
             if isinstance(blob.get("dataRowCount"), int):
                 counts[name] = blob["dataRowCount"]
         cfg = doc.get("exportConfig") or {}
         period = (cfg.get("timePeriod") or {}).get("from") if isinstance(cfg, dict) else None
+        ident = "|".join(str(cfg.get(k, "")) for k in ("exportName", "resourceId")) if isinstance(cfg, dict) else ""
         return Manifest(
-            path, "azure_cost_export", sha, files, counts,
+            path, "azure_cost_export", sha, files, counts, keys=keys, identity=ident,
             billing_period=_yyyymm(period),
             declared_rows=doc.get("dataRowCount") if isinstance(doc.get("dataRowCount"), int) else None,
         )

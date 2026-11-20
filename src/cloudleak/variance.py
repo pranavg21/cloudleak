@@ -35,9 +35,11 @@ from cloudleak.findings import Finding
 from cloudleak.money import SCALE, ZERO, display, fmt
 
 QUANT = Decimal(1).scaleb(-SCALE)
-BUCKETS = ("new", "discontinued", "volume", "rate", "unquantified", "credits", "tax", "purchases", "adjustments")
+BUCKETS = ("coverage", "new", "discontinued", "volume", "rate", "unquantified", "credits", "tax", "purchases",
+           "adjustments")
 BUCKET_LABELS = {
-    "new": "New spend", "discontinued": "Discontinued spend", "volume": "Usage volume",
+    "coverage": "Export missing for one period", "new": "New spend", "discontinued": "Discontinued spend",
+    "volume": "Usage volume",
     "rate": "Unit rate", "unquantified": "Other usage change", "credits": "Credits, refunds & discounts",
     "tax": "Tax", "purchases": "Purchases & fees", "adjustments": "Adjustments & other",
 }
@@ -59,6 +61,7 @@ class Bridge:
     base_days: int
     current_days: int
     notes: list[str] = field(default_factory=list)
+    gaps: list[str] = field(default_factory=list)
 
     @property
     def delta(self) -> Decimal:
@@ -72,7 +75,7 @@ class Bridge:
 
     def pct_change(self) -> str | None:
         """Percent change; per-day normalized when period lengths differ."""
-        if self.base_total == 0 or self.base_days == 0 or self.current_days == 0:
+        if self.base_total == 0 or self.base_days == 0 or self.current_days == 0 or self.gaps:
             return None
         with localcontext() as ctx:
             ctx.prec = 40
@@ -102,6 +105,7 @@ class Bridge:
             "by_service": rows(self.services),
             "top_line_changes": rows(self.top_keys),
             "notes": self.notes,
+            "coverage_gaps": self.gaps,
         }
 
     def narrative(self) -> str:
@@ -113,7 +117,12 @@ class Bridge:
             pct_text = f", {'+' if not pc.startswith('-') else ''}{pc}%"
             if not self.comparable_days:
                 pct_text += " per day"
-        lines = [
+        lines = []
+        if self.buckets.get("coverage"):
+            lines.append(f"NOT COMPARABLE AS-IS: {'; '.join(self.gaps)}. "
+                         f"{display(self.buckets['coverage'], cur)} of the change comes from data missing in one "
+                         "period, not from a change in spend.")
+        lines += [
             f"{self.cost_basis.capitalize()} spend {direction} from {display(self.base_total, cur)} in "
             f"{self.base_period} to {display(self.current_total, cur)} in {self.current_period} "
             f"({'+' if self.delta >= 0 else ''}{display(self.delta, cur)}{pct_text})."
@@ -173,7 +182,7 @@ def choose_periods(ws: Workspace, base: str | None, current: str | None,
 def compute(ws: Workspace, base: str, current: str, *, top: int = 12) -> list[Bridge]:
     statuses = period_statuses(ws)
     rows = ws.rows("""
-        SELECT currency, cost_basis, billing_period AS p, provider, sub_account_id,
+        SELECT currency, cost_basis, billing_period AS p, provider, billing_account_id, sub_account_id,
                any_value(sub_account_name) AS sub_account_name,
                COALESCE(service, '(no service)') AS service, COALESCE(sku, '(no sku)') AS sku,
                usage_unit AS unit, charge_category AS cat, any_value(service_category) AS service_category,
@@ -181,13 +190,14 @@ def compute(ws: Workspace, base: str, current: str, *, top: int = 12) -> list[Br
                sum(usage_quantity) AS qty, count(usage_quantity) = count(*) AS qty_complete,
                arg_max(tags, cost) AS tags
         FROM valid WHERE billing_period IN (?, ?)
-        GROUP BY currency, cost_basis, billing_period, provider, sub_account_id, service, sku, usage_unit,
-                 charge_category
+        GROUP BY currency, cost_basis, billing_period, provider, billing_account_id, sub_account_id, service, sku,
+                 usage_unit, charge_category
     """, [base, current])
     groups: dict[tuple, dict] = defaultdict(lambda: {"b": {}, "c": {}})
     for r in rows:
         side = "b" if r["p"] == base else "c"
-        key = (r["provider"], r["sub_account_id"], r["service"], r["sku"], r["unit"], r["cat"])
+        key = (r["provider"], r["sub_account_id"], r["service"], r["sku"], r["unit"], r["cat"],
+               r["billing_account_id"])
         groups[(r["currency"], r["cost_basis"])]["b" if side == "b" else "c"][key] = r
 
     bridges = []
@@ -215,16 +225,29 @@ def _bridge(currency, basis, base, current, b: dict, c: dict, statuses, top: int
         return {"credit": "credits", "refund": "credits", "discount": "credits", "tax": "tax",
                 "purchase": "purchases", "fee": "purchases"}.get(cat)
 
+    # A provider/billing account present in only one of the two periods is an export gap, not a change in
+    # spend: route its whole difference to the "coverage" bucket instead of new/discontinued.
+    scopes_b = {(k[0], k[6]) for k in b}
+    scopes_c = {(k[0], k[6]) for k in c}
+    gap_scopes = scopes_b ^ scopes_c
+    gaps = sorted(f"{p} {a or '(no billing account)'} has no rows in "
+                  f"{current if (p, a) in scopes_b else base}" for p, a in gap_scopes)
+
     with localcontext() as ctx:
         ctx.prec = 60
         for key in sorted(set(b) | set(c), key=lambda k: tuple(str(x) for x in k)):
             rb, rc = b.get(key), c.get(key)
-            provider, _acct, service, sku, unit, cat = key
+            provider, _acct, service, sku, unit, cat, bacct = key
             label = f"{service} / {sku}"
             g1 = rb["gross"] if rb else ZERO
             g2 = rc["gross"] if rc else ZERO
             e1 = rb["embedded"] if rb else ZERO
             e2 = rc["embedded"] if rc else ZERO
+            if (key[0], key[6]) in gap_scopes:
+                amount = (rc["cost"] if rc else ZERO) - (rb["cost"] if rb else ZERO)
+                buckets["coverage"] += amount
+                drivers["coverage"][f"{provider} {bacct or ''}".strip()] += amount
+                continue
             if e1 != e2:
                 buckets["credits"] += e2 - e1
                 drivers["credits"][f"{service} (credits applied to usage)"] += e2 - e1
@@ -293,9 +316,12 @@ def _bridge(currency, basis, base, current, b: dict, c: dict, statuses, top: int
     if "preliminary_estimate" in fin:
         notes.append("At least one period is a preliminary estimate; late charges (for example support fees, "
                      "credits and refunds) can still post.")
+    if gaps:
+        notes.insert(0, "Export gap: " + "; ".join(gaps) + ". Supply the missing export before reading this "
+                     "bridge as a change in spend.")
     return Bridge(currency, basis, base, current, base_total, cur_total, buckets, drv, agg("service_category"),
                   [{**x, "service": x["service"]} for x in agg("service")][:top], key_changes[:top * 2], bd, cd,
-                  notes)
+                  notes, gaps)
 
 
 def variance_findings(bridges: list[Bridge], *, statuses_lookup: dict | None = None,

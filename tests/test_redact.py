@@ -105,7 +105,7 @@ def test_numbers_are_not_false_leaks(tmp_path):
     b = tmp_path / "bundle"
     b.mkdir()
     (b / "x.csv").write_text("line_item_usage_amount,line_item_unblended_cost\n123456789012,0.000000000012\n")
-    assert scan_bundle(b, {}) == 2
+    assert scan_bundle(b, {}) == 4  # two header cells, two values
 
 
 def test_resolve_round_trip(hostile, tmp_path):

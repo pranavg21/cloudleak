@@ -57,16 +57,28 @@ def test_duplicate_file_fails(tmp_path):
     shutil.copy(p, tmp_path / "b" / "copy.csv")
     with Workspace([tmp_path]) as ws:
         assert statuses(ws, "CL-ING-002") == ["FAIL"]
-        assert statuses(ws, "CL-ACC-006") == ["WARN"]
+        assert set(statuses(ws, "CL-ACC-006")) == {"FAIL"}
 
 
-def test_overlapping_deliveries_warn(tmp_path):
+def test_redelivered_export_fails(tmp_path):
+    """A second delivery of the same month (different bytes, same line items) double counts: FAIL."""
     rows = [aws_row(lid="1"), aws_row(lid="2", line_item_resource_id="i-0def")]
     write_csv(tmp_path / "d1.csv", AWS_COLS, rows)
     write_csv(tmp_path / "d2.csv", AWS_COLS, rows + [aws_row(lid="3", line_item_resource_id="i-new")])
     with Workspace([tmp_path]) as ws:
-        r = results(ws, "CL-ACC-006")
-        assert r[0].status == "WARN" and r[0].metrics["duplicated_line_items"] == 2
+        r = {x.scope: x for x in results(ws, "CL-ACC-006")}
+        assert r["d1.csv"].status == "FAIL" and r["d1.csv"].metrics["duplicated_line_items"] == 2
+        assert run_doctor(ws).worst == "FAIL"
+
+
+def test_small_overlap_only_warns(tmp_path):
+    shared = aws_row(lid="s", line_item_resource_id="i-shared")
+    write_csv(tmp_path / "a.csv", AWS_COLS, [shared] + [aws_row(lid=f"a{i}", line_item_resource_id=f"i-a{i}")
+                                                       for i in range(9)])
+    write_csv(tmp_path / "b.csv", AWS_COLS, [shared] + [aws_row(lid=f"b{i}", line_item_resource_id=f"i-b{i}")
+                                                       for i in range(9)])
+    with Workspace([tmp_path]) as ws:
+        assert set(statuses(ws, "CL-ACC-006")) == {"WARN"}
 
 
 def test_mixed_currency_kept_separate(tmp_path):
