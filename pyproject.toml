@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cloudleak-cli"
+dynamic = ["version"]
+description = "Offline, zero-IAM audit CLI for AWS, Azure, GCP and FOCUS billing exports: data-quality doctor, invoice reconciliation, month-over-month variance, evidence-graded findings and fail-closed redaction."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.10"
+authors = [{ name = "The CloudLeak Authors" }]
+keywords = ["finops", "focus", "cloud-cost", "aws-cur", "azure-cost-management", "gcp-billing", "duckdb", "reconciliation", "billing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Accounting",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
+# One runtime dependency, on purpose. Every extra package is supply-chain
+# surface for a tool that handles billing data.
+dependencies = ["duckdb>=1.3,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "jsonschema>=4.21", "ruff==0.17.6"]
+
+[project.scripts]
+cloudleak = "cloudleak.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/pranavg21/cloudleak"
+Issues = "https://github.com/pranavg21/cloudleak/issues"
+Changelog = "https://github.com/pranavg21/cloudleak/blob/main/CHANGELOG.md"
+Security = "https://github.com/pranavg21/cloudleak/blob/main/SECURITY.md"
+
+[tool.hatch.version]
+path = "src/cloudleak/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cloudleak"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/cloudleak", "tests", "samples", "docs", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md", "SECURITY.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
+ignore = [
+    "S101",   # assert is fine in tests
+    "S608",   # SQL is built from validated identifiers only; see engine.quote_ident
+    "RUF001", "RUF002", "RUF003",
+    "SIM108",
+    "RUF005",  # list concatenation reads fine here
+    "B905",    # zip() over equal-length sequences built together
+    "S311",    # random is only used to make synthetic fixtures
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B", "SIM115", "RUF059"]

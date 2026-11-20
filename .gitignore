@@ -1,10 +1,20 @@
 __pycache__/
 *.py[cod]
-venv/
+*.egg-info/
+build/
+dist/
 .venv/
+venv/
 .pytest_cache/
-node_modules/
-.next/
-.env
-.env.local
+.ruff_cache/
+.coverage
+# Redaction keys and local workspaces never belong in git.
+.cloudleak/
+*.key
+# Generated reports can contain billing identifiers.
+cloudleak-demo/
+brief.html
+report.html
+report.json
+shareable.zip
 .DS_Store

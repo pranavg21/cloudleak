@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pranavg21/cloudleak/schemas/report.v1.schema.json",
+  "title": "cloudleak.report.v1",
+  "description": "Envelope written by `cloudleak audit|doctor|variance|reconcile --output report.json`. Money values are exact decimal strings.",
+  "type": "object",
+  "required": ["schema_version", "tool", "run", "trust_boundary", "inputs", "periods", "totals", "findings", "limitations"],
+  "properties": {
+    "schema_version": {"const": "cloudleak.report.v1"},
+    "tool": {
+      "type": "object",
+      "required": ["name", "version", "duckdb_version", "rule_pack_version", "rule_pack_hash"]
+    },
+    "run": {
+      "type": "object",
+      "required": ["report_run_id", "command", "generated_at"],
+      "properties": {"report_run_id": {"type": "string", "pattern": "^clr_[0-9a-f]{20}$"}}
+    },
+    "trust_boundary": {
+      "type": "object",
+      "properties": {
+        "network_access": {"const": "none"},
+        "cloud_credentials": {"const": "none"},
+        "evidence_ceiling": {"const": "L2"}
+      }
+    },
+    "synthetic_data": {"type": "boolean"},
+    "inputs": {
+      "type": "array",
+      "items": {"type": "object", "required": ["source_id", "name", "format", "bytes", "sha256", "rows"]}
+    },
+    "periods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["provider", "billing_period", "currency", "cost_basis", "finality", "days_covered", "total"],
+        "properties": {"finality": {"enum": ["finalized", "preliminary_estimate", "unknown"]}}
+      }
+    },
+    "totals": {"type": "array"},
+    "breakdowns": {"type": "object"},
+    "doctor": {"type": ["object", "null"]},
+    "variance": {"type": ["array", "null"]},
+    "findings": {"type": "array", "items": {"$ref": "finding.v1.schema.json"}},
+    "limitations": {"type": "array", "items": {"type": "string"}}
+  }
+}

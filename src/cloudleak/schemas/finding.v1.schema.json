@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pranavg21/cloudleak/schemas/finding.v1.schema.json",
+  "title": "cloudleak.finding.v1",
+  "description": "One evidence-graded CloudLeak finding. Billing data alone never exceeds evidence level L2, and verified_savings is always null at L1 and L2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "finding_id", "report_run_id", "rule_id", "title", "summary", "classification",
+    "evidence_level", "severity", "provider", "billing_account_id", "sub_account_id", "resource_id",
+    "resource_id_source", "region", "service", "billing_period", "billing_period_start", "billing_period_end",
+    "period_finality", "currency", "financials", "exact_evidence", "unknown_information",
+    "potential_false_positives", "required_verification_steps", "owner_routing", "details", "review_status",
+    "action_risk", "approval_history", "verified_outcome", "reproducibility"
+  ],
+  "properties": {
+    "schema_version": {"const": "cloudleak.finding.v1"},
+    "finding_id": {"type": "string", "pattern": "^clf_[0-9a-f]{20}$"},
+    "report_run_id": {"type": "string", "pattern": "^clr_[0-9a-f]{20}$"},
+    "rule_id": {"type": "string", "pattern": "^CL-[A-Z]{3}-[0-9]{3}$"},
+    "title": {"type": "string"},
+    "summary": {"type": "string"},
+    "classification": {"enum": ["qa_defect", "reconciliation_delta", "variance_driver", "billing_signature_candidate"]},
+    "evidence_level": {"enum": ["L1", "L2", "L3", "L4", "L5"]},
+    "severity": {"enum": ["info", "low", "medium", "high"]},
+    "provider": {"type": ["string", "null"]},
+    "billing_account_id": {"type": ["string", "null"]},
+    "sub_account_id": {"type": ["string", "null"]},
+    "resource_id": {"type": ["string", "null"]},
+    "resource_id_source": {"type": ["string", "null"]},
+    "region": {"type": ["string", "null"]},
+    "service": {"type": ["string", "null"]},
+    "billing_period": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}$"},
+    "billing_period_start": {"type": ["string", "null"], "format": "date-time"},
+    "billing_period_end": {"type": ["string", "null"], "format": "date-time"},
+    "period_finality": {"enum": ["finalized", "preliminary_estimate", "unknown"]},
+    "currency": {"type": ["string", "null"]},
+    "financials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cost_basis", "observed_cost", "observed_effective_cost", "verified_savings"],
+      "properties": {
+        "cost_basis": {"type": ["string", "null"], "enum": ["billed", "amortized", "unknown", null]},
+        "observed_cost": {"$ref": "#/$defs/money"},
+        "observed_effective_cost": {"$ref": "#/$defs/money"},
+        "verified_savings": {"$ref": "#/$defs/money"}
+      }
+    },
+    "exact_evidence": {
+      "type": "object",
+      "required": ["rule_id", "matched_rows", "matched_values", "source_sha256", "sample_rows"],
+      "properties": {
+        "rule_id": {"type": "string"},
+        "matched_rows": {"type": "integer", "minimum": 0},
+        "matched_values": {"type": "array", "items": {"type": "string"}},
+        "source_sha256": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+        "sample_rows": {
+          "type": "array",
+          "items": {"type": "object", "required": ["source_id", "row"],
+                    "properties": {"source_id": {"type": "integer"}, "row": {"type": "integer"}}}
+        }
+      }
+    },
+    "unknown_information": {"type": "array", "items": {"type": "string"}},
+    "potential_false_positives": {"type": "array", "items": {"type": "string"}},
+    "required_verification_steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["description", "command", "tool", "action_risk"],
+        "properties": {
+          "description": {"type": "string"},
+          "command": {"type": ["string", "null"]},
+          "tool": {"type": ["string", "null"]},
+          "action_risk": {"const": "none_readonly"}
+        }
+      }
+    },
+    "owner_routing": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {"status": {"enum": ["tag", "account", "unattributed"]}}
+    },
+    "details": {"type": "object"},
+    "review_status": {"enum": ["unreviewed", "investigating", "accepted", "dismissed", "resolved"]},
+    "action_risk": {"enum": ["none_readonly", "low", "medium", "high", "unknown"]},
+    "approval_history": {"type": "array"},
+    "verified_outcome": {"type": ["object", "null"]},
+    "reproducibility": {
+      "type": "object",
+      "required": ["cloudleak_version", "duckdb_version", "rule_pack_hash"],
+      "properties": {
+        "cloudleak_version": {"type": "string"},
+        "duckdb_version": {"type": "string"},
+        "rule_pack_hash": {"type": "string"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"evidence_level": {"enum": ["L1", "L2"]}}},
+      "then": {"properties": {"financials": {"properties": {"verified_savings": {"type": "null"}}}}}
+    },
+    {
+      "if": {"properties": {"evidence_level": {"const": "L2"}}},
+      "then": {"properties": {
+        "unknown_information": {"minItems": 1},
+        "potential_false_positives": {"minItems": 1},
+        "required_verification_steps": {"minItems": 1}
+      }}
+    }
+  ],
+  "$defs": {
+    "money": {
+      "description": "Exact decimal as a string (never a JSON number), or null.",
+      "type": ["string", "null"],
+      "pattern": "^-?[0-9]+\\.[0-9]{2,}$"
+    }
+  }
+}

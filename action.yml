@@ -1,0 +1,45 @@
+name: CloudLeak doctor
+description: Offline data-quality, finality and FOCUS gap checks for cloud billing exports (no credentials, no network).
+author: The CloudLeak Authors
+branding:
+  icon: check-circle
+  color: blue
+inputs:
+  path:
+    description: Export file(s) or directory to check (space-separated).
+    required: true
+  fail-on:
+    description: Fail the step when any check reaches this status (fail, warn or never).
+    default: fail
+  junit:
+    description: Where to write JUnit XML.
+    default: cloudleak-doctor.xml
+  sarif:
+    description: Where to write SARIF 2.1.0.
+    default: cloudleak-doctor.sarif
+outputs:
+  junit:
+    description: Path of the JUnit XML report.
+    value: ${{ inputs.junit }}
+  sarif:
+    description: Path of the SARIF report.
+    value: ${{ inputs.sarif }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install CloudLeak from this action's checkout
+      shell: bash
+      run: python -m pip install --disable-pip-version-check --quiet "${{ github.action_path }}"
+    - name: Run cloudleak doctor
+      shell: bash
+      env:
+        CL_PATH: ${{ inputs.path }}
+        CL_FAIL_ON: ${{ inputs.fail-on }}
+        CL_JUNIT: ${{ inputs.junit }}
+        CL_SARIF: ${{ inputs.sarif }}
+      run: |
+        # shellcheck disable=SC2086 # paths are intentionally split on spaces
+        cloudleak doctor $CL_PATH --fail-on "$CL_FAIL_ON" -o "$CL_JUNIT" -o "$CL_SARIF" --no-color
