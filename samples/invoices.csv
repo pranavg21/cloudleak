@@ -1,0 +1,3 @@
+provider,period,currency,total,label
+aws,2026-09,USD,27206.81,AWS invoice September (synthetic)
+gcp,2026-09,USD,586.44,GCP invoice September (synthetic)

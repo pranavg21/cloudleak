@@ -1,0 +1,31 @@
+name: Provider schema quirk
+description: An export CloudLeak does not recognize or reads incorrectly. Headers only, never billing data.
+labels: ["schema-quirk"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste billing rows, account IDs, invoice numbers or resource names.** Header names and the
+        CloudLeak check ID are enough. If a value's *shape* matters, describe it ("12 digits", "MM/DD/YYYY").
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider and export type
+      options: [AWS CUR legacy, AWS CUR 2.0 / Data Exports, AWS FOCUS, Azure EA, Azure MCA, Azure FOCUS, GCP standard, GCP detailed, GCP FOCUS, Other FOCUS, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: headers
+    attributes:
+      label: Header row
+      description: The first line of the file only.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened and what you expected
+      description: Include the CloudLeak check or rule ID (for example CL-ING-001) and `cloudleak --version`.
+    validations:
+      required: true

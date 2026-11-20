@@ -1,5 +1,0 @@
-InvoiceId,BillingCurrency,BilledCost,ServiceCategory,ServiceSubcategory,SubAccountName,ResourceId,RegionName,ChargeCategory
-DEMO-1042,USD,24.75,Storage,Managed disk,engineering,disk-17,east,Usage
-DEMO-1043,USD,90,Storage,Managed disk,analytics,disk-51,west,Usage
-DEMO-1042,USD,-4.75,Storage,Managed disk,engineering,disk-17,east,Credit
-DEMO-1042,USD,2,Storage,Snapshot,engineering,snapshot-11,east,Usage
