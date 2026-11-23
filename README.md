@@ -100,17 +100,19 @@ line instead.
 Outputs pick their format from the extension: `.html`, `.json`, `.md`, `.csv`, `.sarif`, `.xml` (JUnit,
 doctor only). Repeat `-o` for several.
 
-## Supported exports
+## Tested export shapes
 
-| Provider | Exports | Notes |
+These checks use synthetic charges and independent invoice totals; each row is exercised in CI by
+[`tests/test_export_shapes.py`](tests/test_export_shapes.py). Use the table to choose the applicable comparison.
+
+| Export | Tested comparison | Outside this evidence |
 | --- | --- | --- |
-| AWS | CUR legacy (`lineItem/…`) and CUR 2.0 / Data Exports (`line_item_…`). CSV, gzip CSV and Parquet | Billed cost uses the unblended cost field. Split allocation amounts and effective costs serve different purposes. Invoice IDs help assess finality. |
-| Azure | Cost Management actual and amortized exports, including EA and MCA field layouts | Billed and amortized costs stay separate. Azure pre-tax amounts may require adjustments to compare with the payable invoice. |
-| GCP | Standard and detailed usage cost exports | Net cost includes embedded credits. The invoice month can differ from the usage month. |
-| FOCUS | Cost and Usage columns, with synthetic header cases from FOCUS 1.0 through 1.4 | Column names provide evidence of a minimum version. Use the FinOps Foundation validator for specification conformance. [FOCUS validator](https://github.com/finopsfoundation/focus-spec-validator) |
+| AWS legacy CUR and CUR 2.0 | Slash-named legacy CSV and named CUR 2.0 projections including split allocation, credits, refunds, RI-only and Savings Plans-only cases. Billed totals use unblended cost. | All-option exports and contractual net discounts |
+| Azure Cost Management | Actual and amortized exports kept separate; selected EA, MCA, MOSP and MPA fields. MCA control checks billing-currency list cost. | Partner Center invoices, taxes and credits absent from the export |
+| Google Cloud Billing | Flattened standard/detailed CSV and nested Parquet, including repeated credits and late usage assigned by invoice month | Full 2026 CUD migration and fee-offset handling |
+| FOCUS Cost and Usage | Synthetic normative headers for 1.0–1.4; AWS 1.2 and selected Microsoft 1.0/1.2 export projections | Vendor-wide conformance and complete GCP/OCI delivery coverage |
 
-The examples exercise specific fields and file shapes. Production coverage across provider agreements,
-delivery options and versions remains unverified.
+A zero reconciliation exit code means the compared amounts agree within tolerance. Inspect the signed difference, status and period finality before treating that result as an invoice close.
 
 Something not recognized? Open a [schema quirk issue](https://github.com/pranavg21/cloudleak/issues/new?template=schema-quirk.yml)
 with a synthetic example. Replace private header names and values before sharing.
