@@ -292,3 +292,21 @@ def test_key_and_output_aliases(hostile, tmp_path):
     with pytest.raises(InputError, match="permissions"):
         redact([str(hostile)], str(tmp_path / "new.zip"), key_file=str(key))
     assert hostile.read_bytes() == prior and not (tmp_path / "new.zip").exists()
+
+
+def test_key_with_windows_line_ending_is_accepted(tmp_path):
+    """Keys written on Windows (or edited there) end in CRLF; they must load on every platform."""
+    import os
+
+    from cloudleak.redact import load_key
+    key = tmp_path / "k"
+    key.write_bytes(b"ab" * 32 + b"\r\n")
+    if os.name == "posix":
+        os.chmod(key, 0o600)
+    assert load_key(key, create=False)[0] == bytes.fromhex("ab" * 32)
+
+
+def test_created_key_has_no_carriage_return(tmp_path):
+    from cloudleak.redact import load_key
+    load_key(tmp_path / "new.key", create=True)
+    assert b"\r" not in (tmp_path / "new.key").read_bytes()

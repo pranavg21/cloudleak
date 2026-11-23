@@ -197,7 +197,7 @@ def load_key(path: Path | None, *, create: bool) -> tuple[bytes, Path]:
         # Publish only a complete key, including for simultaneous first-time users.
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".cloudleak-key-")
         try:
-            with os.fdopen(fd, "w", encoding="ascii") as fh:
+            with os.fdopen(fd, "w", encoding="ascii", newline="\n") as fh:  # no CRLF translation on Windows
                 fh.write(secrets.token_hex(32) + "\n")
             with suppress(FileExistsError):
                 os.link(tmp, path)
@@ -208,10 +208,10 @@ def load_key(path: Path | None, *, create: bool) -> tuple[bytes, Path]:
     with path.open("rb") as fh:
         if os.name == "posix" and os.fstat(fh.fileno()).st_mode & 0o077:
             raise InputError("redaction key permissions allow other users access", hint="Set key permissions to 0600.")
-        raw = fh.read(66)
-    if not re.fullmatch(rb"[0-9a-f]{64}\n?", raw):
+        raw = fh.read(67)
+    if not re.fullmatch(rb"[0-9a-f]{64}(?:\r?\n)?", raw):
         raise InputError("invalid redaction key (expected 64 hex characters)")
-    return bytes.fromhex(raw.decode("ascii")), path
+    return bytes.fromhex(raw[:64].decode("ascii")), path
 
 
 def key_fingerprint(key: bytes) -> str:
