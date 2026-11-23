@@ -11,13 +11,18 @@ the newest version whose distinguishing columns it carries.
 
 from __future__ import annotations
 
+from cloudleak.errors import InputError
 from cloudleak.providers.base import Columns, Mapping, month_start
 
 # Columns whose presence distinguishes a FOCUS version (normalized names).
 VERSION_MARKERS: list[tuple[str, tuple[str, ...]]] = [
-    ("1.3", ("service_provider_name", "host_provider_name", "contract_applied")),
-    ("1.2", ("invoice_id", "pricing_currency", "billing_account_type", "sub_account_type")),
-    ("1.1", ("charge_class", "sku_meter", "service_subcategory", "capacity_reservation_id")),
+    ("1.4", ("invoice_detail_id", "commitment_program_eligibility_details")),
+    ("1.3", ("service_provider_name", "host_provider_name", "contract_applied", "allocated_method_details",
+             "allocated_method_id", "allocated_resource_id", "allocated_resource_name", "allocated_tags")),
+    ("1.2", ("invoice_id", "pricing_currency", "pricing_currency_effective_cost",
+             "pricing_currency_list_unit_price", "pricing_currency_contracted_unit_price")),
+    ("1.1", ("sku_meter", "sku_price_details", "service_subcategory", "capacity_reservation_id",
+             "capacity_reservation_status", "commitment_discount_quantity", "commitment_discount_unit")),
     ("1.0", ("billed_cost", "effective_cost", "charge_period_start")),
 ]
 
@@ -58,7 +63,7 @@ def detect_version(cols: Columns) -> str:
 
 
 def provider_sql(cols: Columns) -> str:
-    name = cols.text("service_provider_name", "provider_name", "invoice_issuer_name", "publisher_name")
+    name = cols.text("service_provider_name", "provider_name")
     return (
         f"CASE WHEN lower({name}) LIKE '%amazon%' OR lower({name}) LIKE 'aws%' THEN 'aws' "
         f"WHEN lower({name}) LIKE '%microsoft%' OR lower({name}) LIKE '%azure%' THEN 'azure' "
@@ -69,12 +74,22 @@ def provider_sql(cols: Columns) -> str:
 
 def build(cols: Columns) -> Mapping:
     c = cols
+    if c.has("invoice_issue_status", "invoice_detail_grain", "invoice_detail_created", "invoice_issue_date",
+             "invoice_detail_last_updated", "payment_currency_billed_cost", "invoice_detail_description",
+             "payment_currency_invoice_detail_id", "reference_invoice_id", "payment_terms", "payment_due_date"):
+        raise InputError("FOCUS invoice-detail data cannot be summed as cost and usage",
+                         hint="Supply the cost-and-usage dataset separately.")
     category = c.text("charge_category")
     period = c.ts("billing_period_start")
     charge_start = c.ts("charge_period_start")
     status = c.text("commitment_discount_status")
     pcat = c.text("pricing_category")
     version = detect_version(c)
+    invoice = c.text("invoice_id")
+    if c.has("x_invoice_id"):
+        # Microsoft exports used an extension before InvoiceId was standardized.
+        azure_invoice = f"CASE WHEN {provider_sql(c)} = 'azure' THEN {c.text('x_invoice_id')} END"
+        invoice = f"coalesce({invoice}, {azure_invoice})"
     m = Mapping(
         provider="focus",  # replaced per row by provider_sql in the engine
         dataset=f"focus_{version.replace('.', '_')}",
@@ -86,8 +101,9 @@ def build(cols: Columns) -> Mapping:
         billing_account_id=c.text("billing_account_id"),
         sub_account_id=c.text("sub_account_id"),
         sub_account_name=c.text("sub_account_name"),
-        invoice_id=c.text("invoice_id"),
-        billing_period_start=f"COALESCE({month_start(period)}, {month_start(charge_start)})",
+        invoice_id=invoice,
+        invoice_issuer=c.text("invoice_issuer_name"),
+        billing_period_start=month_start(period),
         charge_start=charge_start,
         charge_end=c.ts("charge_period_end"),
         currency=c.text("billing_currency"),
@@ -118,9 +134,11 @@ def build(cols: Columns) -> Mapping:
         provider_sql=provider_sql(c),
     )
     m.capabilities = {
-        "invoice_id": c.has("invoice_id"),
+        "invoice_id": c.has("invoice_id", "x_invoice_id"),
         "resource_id": c.has("resource_id"),
         "tags": c.has("tags"),
         "effective_cost": c.has("effective_cost"),
     }
+    m.notes.append(f"Cost-and-usage columns suggest FOCUS {version} or later. Header inference alone "
+                   "cannot establish version or provider conformance.")
     return m

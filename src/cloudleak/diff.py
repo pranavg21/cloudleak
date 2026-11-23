@@ -2,9 +2,8 @@
 
 Providers restate open periods: AWS refreshes the CUR daily and posts support
 fees and credits after month end; GCP posts late usage; corrections arrive as
-new rows. Diffing a preliminary snapshot against a later one shows exactly
-which charges were added, removed or re-priced, by charge category, service
-and account, without loading both snapshots into one total.
+new rows. The comparison measures aggregate cost changes by charge category, service
+and account, plus changes in row counts and invoice coverage.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from decimal import Decimal
 
 from cloudleak.analysis import period_statuses
 from cloudleak.engine import Workspace
-from cloudleak.money import ZERO, fmt
+from cloudleak.money import ZERO, fmt, money_context
 
 KEYS = ("provider", "billing_account_id", "billing_period", "currency", "cost_basis")
 
@@ -55,6 +54,7 @@ def _changes(before: dict, after: dict) -> list[dict]:
     return out
 
 
+@money_context
 def diff(before: Workspace, after: Workspace) -> dict:
     b, a = _snapshot(before), _snapshot(after)
     scopes = []
@@ -62,19 +62,30 @@ def diff(before: Workspace, after: Workspace) -> dict:
         sb, sa = b.get(key), a.get(key)
         tb = sb["total"] if sb else ZERO
         ta = sa["total"] if sa else ZERO
+        changes = {name: _changes(sb[name] if sb else {}, sa[name] if sa else {})
+                   for name in ("by_category", "by_service", "by_account")}
+        if sb is None or sa is None:
+            status = "added" if sb is None else "removed"
+        else:
+            changed = any(changes.values()) or any(sb[k] != sa[k] for k in ("total", "rows", "invoiced", "finality"))
+            status = "changed" if changed else "unchanged"
         entry = dict(zip(KEYS, key))
         entry.update({
-            "status": "added" if sb is None else "removed" if sa is None else
-                      "changed" if tb != ta or sb["rows"] != sa["rows"] else "unchanged",
+            "status": status,
             "before_total": fmt(tb), "after_total": fmt(ta), "delta": fmt(ta - tb),
             "before_rows": sb["rows"] if sb else 0, "after_rows": sa["rows"] if sa else 0,
+            "before_invoiced_rows": sb["invoiced"] if sb else 0, "after_invoiced_rows": sa["invoiced"] if sa else 0,
             "before_finality": sb["finality"] if sb else None, "after_finality": sa["finality"] if sa else None,
-            "by_charge_category": _changes(sb["by_category"] if sb else {}, sa["by_category"] if sa else {}),
-            "by_service": _changes(sb["by_service"] if sb else {}, sa["by_service"] if sa else {})[:15],
-            "by_account": _changes(sb["by_account"] if sb else {}, sa["by_account"] if sa else {})[:15],
+            "by_charge_category": changes["by_category"],
+            "by_service": changes["by_service"][:15],
+            "by_account": changes["by_account"][:15],
         })
-        if sb and sa and sb["invoiced"] == 0 and sa["invoiced"] > 0:
-            entry["note"] = "The period was finalized between the two snapshots (invoice IDs appeared)."
+        if sb and sa:
+            if sb["finality"] != "finalized" and sa["finality"] == "finalized":
+                entry["note"] = "The later snapshot carries evidence of a finalized invoice for this scope."
+            elif sb["invoiced"] != sa["invoiced"]:
+                entry["note"] = (f"Rows with invoice identifiers changed from {sb['invoiced']} of {sb['rows']} "
+                                 f"to {sa['invoiced']} of {sa['rows']}.")
         scopes.append(entry)
     changed = [s for s in scopes if s["status"] != "unchanged"]
     net: dict[tuple, Decimal] = defaultdict(lambda: ZERO)

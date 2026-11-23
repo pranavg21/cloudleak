@@ -54,7 +54,7 @@ CATALOG: list[CheckSpec] = [
     CheckSpec("CL-ACC-001", "Single currency per total", "accounting",
               "Totals are never summed across currencies; rows without a currency are flagged."),
     CheckSpec("CL-ACC-002", "Billing period finality", "accounting",
-              "Whether each period is finalized (invoice issued) or a preliminary estimate."),
+              "Finality evidence for each billing period, including cases where invoice issuance is unknown."),
     CheckSpec("CL-ACC-003", "Full-period coverage", "accounting",
               "Whether each billing period contains usage for every day of the month."),
     CheckSpec("CL-ACC-004", "Cost basis not mixed", "accounting",
@@ -155,7 +155,7 @@ def run_doctor(ws: Workspace) -> DoctorReport:
             add(CheckResult("CL-ING-001", "FAIL", f"Unrecognized billing format ({len(s.columns)} columns).",
                             _src_name(s),
                             "Supply a native AWS CUR, Azure cost export, GCP billing export or FOCUS file. If this "
-                            "is one, open an issue with the header row only (never data rows).",
+                            "is one, open an issue with a synthetic header example.",
                             {"columns_sample": s.columns[:12]}))
         else:
             m = s.mapping
@@ -260,12 +260,12 @@ def run_doctor(ws: Workspace) -> DoctorReport:
             add(CheckResult("CL-ACC-002", "INFO", f"Finality unknown: {st.reason}.", scope))
         if st.days_covered == 0:
             add(CheckResult("CL-ACC-003", "INFO",
-                            f"Contains only {st.rows:,} late-arriving row(s) used before {st.billing_period} and "
-                            "invoiced in it; the rest of this invoice month is not in these files.", scope))
+                            f"None of the {st.rows:,} rows has a charge date within {st.billing_period}. "
+                            "Daily coverage cannot be established.", scope))
         elif st.partial:
             add(CheckResult("CL-ACC-003", "WARN",
                             f"Covers {st.days_covered} of {st.days_in_period} days ({st.first_day} to "
-                            f"{st.last_day}). Month-over-month comparisons are normalized per day.", scope,
+                            f"{st.last_day}). Compare the observed coverage before interpreting changes.", scope,
                             metrics={"days_covered": st.days_covered, "days_in_period": st.days_in_period}))
     if statuses and not any(s.partial for s in statuses):
         add(CheckResult("CL-ACC-003", "PASS", "Every billing period has usage on every day."))

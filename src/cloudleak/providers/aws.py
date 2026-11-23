@@ -66,36 +66,22 @@ def build(cols: Columns) -> Mapping:
 
     # Amortized cost, per the AWS CUR documentation. Needs RI and SP columns
     # only when such rows exist; NULL when a required column is absent.
-    needed = {
-        "savings_plan_savings_plan_effective_cost", "savings_plan_total_commitment_to_date",
-        "savings_plan_used_commitment", "reservation_effective_cost",
-        "reservation_unused_amortized_upfront_fee_for_billing_period", "reservation_unused_recurring_fee",
-    }
-    if needed <= c.normalized:
-        effective = f"""CASE {ltype}
+    unused_ri = (f"({c.money('reservation_unused_amortized_upfront_fee_for_billing_period')} "
+                 f"+ {c.money('reservation_unused_recurring_fee')})")
+    fee = (f"CASE WHEN {c.text('reservation_reservation_arn')} IS NOT NULL THEN 0 ELSE {unblended} END"
+           if c.has("reservation_reservation_arn") else NULL_MONEY)
+    effective = f"""CASE {ltype}
   WHEN 'SavingsPlanCoveredUsage' THEN {c.money('savings_plan_savings_plan_effective_cost')}
   WHEN 'SavingsPlanRecurringFee' THEN {c.money('savings_plan_total_commitment_to_date')}
        - {c.money('savings_plan_used_commitment')}
   WHEN 'SavingsPlanNegation' THEN 0
   WHEN 'SavingsPlanUpfrontFee' THEN 0
   WHEN 'DiscountedUsage' THEN {c.money('reservation_effective_cost')}
-  WHEN 'RIFee' THEN COALESCE({c.money('reservation_unused_amortized_upfront_fee_for_billing_period')}, 0)
-       + COALESCE({c.money('reservation_unused_recurring_fee')}, 0)
-  ELSE CASE WHEN {ltype} = 'Fee' AND {c.text('reservation_reservation_arn')} IS NOT NULL THEN 0
-       ELSE {unblended} END
+  WHEN 'RIFee' THEN {unused_ri}
+  WHEN 'Fee' THEN {fee}
+  ELSE {unblended}
 END"""
-        caps_effective = True
-    else:
-        effective = f"CASE WHEN {ltype} IS NULL OR {ltype} IN ('Usage','Tax','Credit','Refund') " \
-                    f"THEN {unblended} ELSE {NULL_MONEY} END"
-        caps_effective = False
-
-    unused_commit = (
-        f"CASE WHEN {ltype} = 'RIFee' AND (COALESCE({c.money('reservation_unused_recurring_fee')},0) "
-        f"+ COALESCE({c.money('reservation_unused_amortized_upfront_fee_for_billing_period')},0)) > 0 "
-        f"THEN 'unused' END"
-        if c.has("reservation_unused_recurring_fee") else "CAST(NULL AS VARCHAR)"
-    )
+    unused_commit = f"CASE WHEN {ltype} = 'RIFee' AND {unused_ri} > 0 THEN 'unused' END"
 
     pricing = f"""CASE
   WHEN {ltype} IN ('DiscountedUsage','SavingsPlanCoveredUsage','RIFee','SavingsPlanRecurringFee',
@@ -119,6 +105,7 @@ END"""
         sub_account_id=c.text("line_item_usage_account_id"),
         sub_account_name=c.text("line_item_usage_account_name"),
         invoice_id=c.text("bill_invoice_id"),
+        invoice_issuer=c.text("bill_invoicing_entity"),
         billing_period_start=f"COALESCE({month_start(period_start)}, {month_start(charge_start)})",
         charge_start=charge_start,
         charge_end=c.ts("line_item_usage_end_date"),
@@ -140,7 +127,7 @@ END"""
         "invoice_id": c.has("bill_invoice_id"),
         "resource_id": c.has("line_item_resource_id"),
         "tags": bool(tag_cols) or c.has("resource_tags"),
-        "effective_cost": caps_effective,
+        "effective_cost": False,  # engine verifies coverage on the actual rows
         "split_cost_allocation": bool(c.prefixed("split_line_item_")),
     }
     return m

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
-import tempfile
 import traceback
 from decimal import Decimal
 from pathlib import Path
@@ -20,7 +20,7 @@ from cloudleak._version import __version__
 from cloudleak.errors import EXIT_FINDINGS, EXIT_INPUT, EXIT_OK, CloudLeakError, InputError
 
 EPILOG = ("Runs entirely offline. No cloud credentials, no telemetry, no network access.\n"
-          "Report a provider schema quirk (headers only, never billing data): "
+          "Report a provider schema quirk using synthetic headers: "
           "https://github.com/pranavg21/cloudleak/issues")
 
 
@@ -29,22 +29,6 @@ def _workspace(args, paths, **kw):
     from cloudleak.engine import Workspace
     return Workspace(paths, memory_limit=args.memory_limit, threads=args.threads, temp_dir=args.temp_dir,
                      max_decompressed=int(args.max_decompressed_gb * (1 << 30)), **kw)
-
-
-def _write(path: str, text: str, inputs: list[Path]) -> None:
-    dest = Path(path).expanduser().resolve()
-    for p in inputs:
-        if dest == p:
-            raise InputError(f"refusing to overwrite input file {dest}")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".cloudleak-", dir=dest.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(text)
-        os.replace(tmp, dest)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
 
 
 def _kind(path: str) -> str:
@@ -80,10 +64,25 @@ def _render(kind: str, report: dict) -> str:
     raise InputError(f"unknown format {kind}")
 
 
-def _emit_outputs(args, report: dict, ws) -> None:
-    inputs = [s.file.path for s in ws.sources]
-    for out in args.output or []:
-        _write(out, _render(_kind(out), report), inputs)
+def _emit_outputs(args, report: dict, *workspaces) -> None:
+    from cloudleak.publication import publish_reports
+
+    paths = args.output or []
+    inputs = [s.file.path for ws in workspaces for s in ws.sources]
+    inputs.extend(m.path for ws in workspaces for m in ws.discovery.manifests)
+    if getattr(args, "invoices", None):
+        inputs.append(Path(args.invoices))
+
+    def render(path: str) -> str:
+        kind = _kind(path)
+        if args.command == "diff" and kind != "json":
+            raise InputError("diff writes JSON output only")
+        if kind == "junit" and args.command != "doctor":
+            raise InputError("JUnit output is available for doctor results only")
+        return _render(kind, report)
+
+    publish_reports(paths, inputs, render)
+    for out in paths:
         _say(args, f"wrote {out}")
 
 
@@ -112,7 +111,7 @@ def cmd_doctor(args) -> int:
     from cloudleak.render.formats import doctor_text
     with _workspace(args, args.paths, allow_unknown=True) as ws:
         doc = run_doctor(ws)
-        report = rpt.build(ws, command="doctor", args={}, doctor=doc)
+        report = rpt.build(ws, command="doctor", args={"fail_on": args.fail_on}, doctor=doc)
         _emit_outputs(args, report, ws)
         _stdout(args, report, lambda r: doctor_text(r, verbose=args.verbose, color=_color(args)))
     return _policy(args.fail_on, doc.worst)
@@ -142,7 +141,8 @@ def cmd_audit(args) -> int:
             base, cur = var.choose_periods(ws, None, None)
             bridges = var.compute(ws, base, cur)
             findings += var.variance_findings(bridges)
-        report = rpt.build(ws, command="audit", args={"min_cost": args.min_cost}, doctor=doc,
+        report = rpt.build(ws, command="audit", args={"min_cost": Decimal(args.min_cost),
+                           "no_variance": args.no_variance, "fail_on": args.fail_on}, doctor=doc,
                            findings=findings, bridges=bridges)
         _emit_outputs(args, report, ws)
         _stdout(args, report, audit_text)
@@ -154,23 +154,28 @@ def cmd_variance(args) -> int:
     from cloudleak import report as rpt
     from cloudleak import variance as var
     paths = [args.base_path] + ([args.current_path] if args.current_path else [])
-    with _workspace(args, paths) as ws:
-        base_ids = cur_ids = None
-        if args.current_path:
-            bp = Path(args.base_path).resolve()
-            base_ids = [s.file.source_id for s in ws.sources if s.file.path == bp or bp in s.file.path.parents]
-            cur_ids = [s.file.source_id for s in ws.sources if s.file.source_id not in base_ids]
-        base, cur = var.choose_periods(ws, args.base, args.current, base_ids, cur_ids)
-        bridges = var.compute(ws, base, cur, top=args.top)
+    if args.top < 1:
+        raise InputError("--top must be positive")
+    with _workspace(args, paths, independent_inputs=bool(args.current_path)) as ws:
+        base_ids = ws.source_ids_for(args.base_path)
+        cur_ids = ws.source_ids_for(args.current_path) if args.current_path else base_ids
+        base, cur = var.choose_periods(ws, args.base, args.current,
+                                       base_ids if args.current_path else None,
+                                       cur_ids if args.current_path else None)
+        where = var.comparison_filter(base, cur, base_ids, cur_ids)
+        bridges = var.compute(ws, base, cur, top=args.top, base_sources=base_ids, current_sources=cur_ids)
         findings = var.variance_findings(bridges)
-        report = rpt.build(ws, command="variance", args={"base": base, "current": cur}, findings=findings,
-                           bridges=bridges)
+        arguments = {"base": base, "current": cur, "base_source_ids": base_ids, "current_source_ids": cur_ids,
+                     "top": args.top}
+        report = rpt.build(ws, command="variance", args=arguments, findings=findings, bridges=bridges, where=where)
         _emit_outputs(args, report, ws)
         _stdout(args, report, lambda r: "\n\n".join(b["narrative"] for b in r["variance"]) + "\n")
     return EXIT_OK
 
 
 def cmd_reconcile(args) -> int:
+    from dataclasses import asdict
+
     from cloudleak import report as rpt
     from cloudleak.reconcile import (
         Expectation,
@@ -179,19 +184,24 @@ def cmd_reconcile(args) -> int:
         reconcile,
         reconciliation_findings,
     )
+
     if args.invoices:
+        if any((args.total is not None, args.currency, args.invoice_id, args.period, args.provider,
+                args.issuer, args.billing_account)):
+            raise InputError("With --invoices, put the invoice totals and scope selectors in the CSV.")
         exps = load_invoices(args.invoices)
     else:
         if args.total is None or not args.currency:
             raise InputError("give --total and --currency (with --invoice-id or --period), or --invoices FILE")
         exps = [Expectation(parse_amount(args.total, "--total"), args.currency, args.invoice_id, args.period,
-                            args.provider)]
+                            args.provider, issuer=args.issuer, billing_account=args.billing_account)]
     tol = parse_amount(args.tolerance, "--tolerance")
     if tol < 0:
         raise InputError("--tolerance cannot be negative")
     with _workspace(args, args.paths) as ws:
         results = reconcile(ws, exps, tol)
-        report = rpt.build(ws, command="reconcile", args={"tolerance": args.tolerance},
+        report = rpt.build(ws, command="reconcile", args={"tolerance": tol, "cost_basis": "billed",
+                           "expectations": [asdict(e) for e in exps]},
                            findings=reconciliation_findings(results),
                            extra={"reconciliation": [r.to_dict() for r in results]})
         _emit_outputs(args, report, ws)
@@ -215,19 +225,16 @@ def cmd_reconcile(args) -> int:
 
 def cmd_diff(args) -> int:
     from cloudleak import diff as d
-    from cloudleak.report import dumps, generated_at, tool_info
+    from cloudleak.report import dumps, generated_at, run_id, tool_info
     with _workspace(args, [args.before]) as before, _workspace(args, [args.after]) as after:
         result = d.diff(before, after)
+        arguments = {"fail_on_change": args.fail_on_change}
         report = {"schema_version": "cloudleak.diff.v1", "tool": tool_info(),
-                  "run": {"command": "diff", "generated_at": generated_at()},
+                  "run": {"command": "diff", "generated_at": generated_at(), "arguments": arguments,
+                          "report_run_id": run_id(before, "diff", arguments, after=after)},
                   "before": [s.to_dict() for s in before.sources], "after": [s.to_dict() for s in after.sources],
                   **result}
-        inputs = [s.file.path for s in before.sources + after.sources]
-        for out in args.output or []:
-            if _kind(out) != "json":
-                raise InputError("diff writes JSON output only")
-            _write(out, dumps(report), inputs)
-            _say(args, f"wrote {out}")
+        _emit_outputs(args, report, before, after)
         if args.format == "json":
             sys.stdout.write(dumps(report))
         elif not args.quiet:
@@ -238,19 +245,22 @@ def cmd_diff(args) -> int:
                       f"({s['cost_basis']}): {s['before_total']} -> {s['after_total']} (delta {s['delta']}; rows "
                       f"{s['before_rows']:,} -> {s['after_rows']:,}; finality {s['before_finality']} -> "
                       f"{s['after_finality']})")
-                for c in s["by_charge_category"][:6]:
-                    print(f"    {c['item']:<14} {c['before']:>16} -> {c['after']:>16}  ({c['delta']})")
+                for dim in ("by_charge_category", "by_service", "by_account"):
+                    for change in s[dim][:6]:
+                        print(f"    {dim[3:]} {change['item']}: {change['before']} -> {change['after']} "
+                              f"({change['delta']})")
                 if s.get("note"):
                     print(f"    note: {s['note']}")
             if not result["changed_scopes"]:
-                print("No differences.")
+                print("No changes to the compared aggregates or invoice coverage.")
     return EXIT_FINDINGS if result["changed_scopes"] and args.fail_on_change else EXIT_OK
 
 
 def cmd_redact(args) -> int:
     from cloudleak.redact import redact
     rep = redact(args.paths, args.output_path, key_file=args.key_file, drop_unclassified=args.drop_unclassified,
-                 force=args.force, memory_limit=args.memory_limit, temp_dir=args.temp_dir)
+                 force=args.force, memory_limit=args.memory_limit, temp_dir=args.temp_dir, threads=args.threads,
+                 max_decompressed=int(args.max_decompressed_gb * (1 << 30)))
     _say(args, f"wrote {rep.output}: {len(rep.files)} file(s), {rep.aliased_values:,} distinct identifiers "
                f"aliased, {rep.scanned_cells:,} cells passed the residual-identifier scan.")
     _say(args, f"key fingerprint {rep.key_fingerprint}. Keep the key private; `cloudleak resolve` needs it.")
@@ -259,7 +269,8 @@ def cmd_redact(args) -> int:
 
 def cmd_resolve(args) -> int:
     from cloudleak.redact import build_resolver, resolve_text
-    table = build_resolver(args.source, args.key_file)
+    table = build_resolver(args.source, args.key_file, memory_limit=args.memory_limit, temp_dir=args.temp_dir,
+                           threads=args.threads, max_decompressed=int(args.max_decompressed_gb * (1 << 30)))
     if args.input:
         text = Path(args.input).read_text(encoding="utf-8") if args.input != "-" else sys.stdin.read()
     elif args.aliases:
@@ -274,16 +285,25 @@ def cmd_resolve(args) -> int:
 
 def cmd_demo(args) -> int:
     from cloudleak.fixtures import generate
+    from cloudleak.publication import staged_demo
+    from cloudleak.render.formats import audit_text
+
     target = Path(args.directory).expanduser()
-    if target.exists() and any(target.iterdir()) and not args.force:
-        raise InputError(f"{target} is not empty", hint="Choose an empty directory or pass --force.")
-    generate(target, scale=args.scale)
-    _say(args, f"wrote synthetic exports to {target}/m1 and {target}/m2")
-    args.paths = [str(target / "m1"), str(target / "m2")]
-    args.output = [str(target / "report.html"), str(target / "report.json")]
-    args.min_cost, args.no_variance, args.fail_on = "1", False, "never"
-    cmd_audit(args)
-    _say(args, f"\nOpen {target / 'report.html'} in a browser. Next: cloudleak doctor {target}/m2")
+    summary = ""
+    with staged_demo(target, args.force) as stage:
+        generate(stage, scale=args.scale)
+        audit = argparse.Namespace(**vars(args))
+        audit.paths = [str(stage / "m1"), str(stage / "m2")]
+        audit.output = [str(stage / "report.html"), str(stage / "report.json")]
+        audit.min_cost, audit.no_variance, audit.fail_on = "1", False, "never"
+        audit.quiet, audit.format = True, "text"
+        cmd_audit(audit)
+        if not args.quiet or args.format != "text":
+            report = json.loads((stage / "report.json").read_text(encoding="utf-8"))
+            summary = audit_text(report) if args.format == "text" else _render(args.format, report)
+    _say(args, f"wrote synthetic exports to {target}/m1 and {target}/m2 and invoices to {target}/invoices.csv")
+    sys.stdout.write(summary)
+    _say(args, f"\nOpen {target / 'report.html'} for the audit or {target / 'README.md'} for the invoice comparison.")
     return EXIT_OK
 
 
@@ -314,7 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     g = common.add_argument_group("engine")
     g.add_argument("--memory-limit", default=os.environ.get("CLOUDLEAK_MEMORY_LIMIT", "2GB"),
-                   help="DuckDB memory cap; larger work spills to disk (default 2GB)")
+                   help="DuckDB managed-buffer limit (default 2GB). Process RSS can be higher.")
     g.add_argument("--threads", type=int, default=None, help="worker threads (default: all cores)")
     g.add_argument("--temp-dir", default=os.environ.get("CLOUDLEAK_TEMP_DIR"),
                    help="spill directory; point at an encrypted or RAM-backed path for sensitive data")
@@ -371,15 +391,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_variance)
 
     sp = sub.add_parser("reconcile", parents=[common], help="compare an export with an invoice total",
-                        description="Exact comparison of billed cost against invoice totals. Exit 0 match, "
-                                    "1 difference, 2 input error.")
+                        description="Compare billed cost against invoice totals. Exit 0 when the arithmetic "
+                                    "agrees within tolerance (check status and finality), 1 for a difference "
+                                    "or no matching rows, and 2 for invalid or ambiguous input.")
     sp.add_argument("paths", nargs="+")
     sp.add_argument("--total", help="invoice total as a plain decimal")
     sp.add_argument("--currency", help="ISO 4217 currency of the invoice")
     sp.add_argument("--invoice-id")
     sp.add_argument("--period", help="billing period YYYY-MM")
-    sp.add_argument("--provider", choices=["aws", "azure", "gcp"], help="restrict to one provider")
-    sp.add_argument("--invoices", help="CSV of invoices: total,currency,invoice_id|period[,provider,label]")
+    sp.add_argument("--provider", help="restrict to one normalized service provider")
+    sp.add_argument("--issuer", help="restrict to one invoice issuer name")
+    sp.add_argument("--billing-account", help="restrict to one billing account ID")
+    sp.add_argument("--invoices", help="CSV of invoices: total,currency,invoice_id|period"
+                                      "[,provider,issuer,billing_account,label]")
     sp.add_argument("--tolerance", default="0", help="accepted absolute difference (default 0)")
     sp.add_argument("--format", choices=["text", "json"], default="text")
     out_opt(sp, ".json .html .md .csv")
@@ -390,7 +414,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("before")
     sp.add_argument("after")
     sp.add_argument("--format", choices=["text", "json"], default="text")
-    sp.add_argument("--fail-on-change", action="store_true", help="exit 1 when anything changed")
+    sp.add_argument("--fail-on-change", action="store_true",
+                    help="exit 1 when compared aggregates or invoice coverage changed")
     out_opt(sp, ".json")
     sp.set_defaults(func=cmd_diff)
 
@@ -436,6 +461,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return EXIT_INPUT
     try:
+        if hasattr(args, "max_decompressed_gb"):
+            budget = args.max_decompressed_gb * (1 << 30)
+            if not math.isfinite(budget) or budget < 1:
+                raise InputError("--max-decompressed-gb must give a finite budget of at least one byte")
+        if getattr(args, "threads", None) is not None and args.threads < 1:
+            raise InputError("--threads must be a positive integer")
         return int(args.func(args))
     except CloudLeakError as exc:
         print(f"cloudleak: error: {exc}", file=sys.stderr)
@@ -446,6 +477,11 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     except BrokenPipeError:
         return EXIT_OK
+    except OSError as exc:
+        print(f"cloudleak: filesystem error: {exc}", file=sys.stderr)
+        print("  hint: Check paths, permissions and available space for inputs, reports and --temp-dir.",
+              file=sys.stderr)
+        return EXIT_INPUT
     except Exception as exc:
         if os.environ.get("CLOUDLEAK_DEBUG"):
             traceback.print_exc()

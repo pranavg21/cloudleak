@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: |
           python -c "from cloudleak.fixtures import generate; generate('regen')"
-          diff -r samples/m1 regen/m1 && diff -r samples/m2 regen/m2
+          diff -r samples regen
 
   oldest-duckdb:
     runs-on: ubuntu-latest
@@ -71,13 +71,22 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install build==1.2.2 pip-audit==2.7.3
       - run: python -m build
-      - name: Install the wheel in a clean venv and run the demo
+      - name: Run the wheel quickstart in an empty directory
         run: |
           python -m venv /tmp/w && /tmp/w/bin/pip install dist/*.whl
-          /tmp/w/bin/cloudleak --version
-          /tmp/w/bin/cloudleak demo /tmp/demo -q
-          test -s /tmp/demo/report.html
-          /tmp/w/bin/cloudleak doctor samples/m2 --fail-on fail -q
+          export PATH="/tmp/w/bin:$PATH"
+          mkdir "$RUNNER_TEMP/first-run"
+          cd "$RUNNER_TEMP/first-run"
+          cloudleak --version
+          cloudleak demo -q
+          test -s cloudleak-demo/report.html
+          status=0
+          cloudleak reconcile cloudleak-demo/m1 --invoices cloudleak-demo/invoices.csv || status=$?
+          test "$status" -eq 1
+          cloudleak reconcile cloudleak-demo/m1 --invoice-id EUINAA26090001 --currency USD --total 27206.81 --tolerance 0.01
+          cloudleak doctor cloudleak-demo/m2
+          cloudleak variance cloudleak-demo/m1 cloudleak-demo/m2 -o brief.html
+          test -s brief.html
       - name: Audit runtime dependencies for known vulnerabilities
         run: /tmp/w/bin/python -m pip freeze --exclude-editable > /tmp/req.txt && pip-audit -r /tmp/req.txt
       - uses: actions/upload-artifact@v4

@@ -112,6 +112,7 @@ class Mapping:
     cost_basis: str  # billed | amortized | unknown
     cost_raw: str  # VARCHAR expression of the primary cost column (for parse diagnostics)
     cost: str  # money expression
+    billed_precision: str = "'decimal'"
     gross_cost: str | None = None
     effective_cost: str = NULL_MONEY
     list_cost: str = NULL_MONEY
@@ -119,6 +120,7 @@ class Mapping:
     sub_account_id: str = NULL_STR
     sub_account_name: str = NULL_STR
     invoice_id: str = NULL_STR
+    invoice_issuer: str = NULL_STR
     billing_period_start: str = "CAST(NULL AS DATE)"
     charge_start: str = "CAST(NULL AS TIMESTAMP)"
     charge_end: str = "CAST(NULL AS TIMESTAMP)"
@@ -153,12 +155,14 @@ class Mapping:
             "sub_account_id": self.sub_account_id,
             "sub_account_name": self.sub_account_name,
             "invoice_id": self.invoice_id,
+            "invoice_issuer": self.invoice_issuer,
             "billing_period_start": self.billing_period_start,
             "charge_start": self.charge_start,
             "charge_end": self.charge_end,
             "currency": f"UPPER({self.currency})",
             "cost_raw": self.cost_raw,
             "cost": self.cost,
+            "billed_precision": self.billed_precision,
             "gross_cost": gross,
             "effective_cost": self.effective_cost,
             "list_cost": self.list_cost,
@@ -190,12 +194,14 @@ CANONICAL_TYPES: dict[str, str] = {
     "sub_account_id": "VARCHAR",
     "sub_account_name": "VARCHAR",
     "invoice_id": "VARCHAR",
+    "invoice_issuer": "VARCHAR",
     "billing_period_start": "DATE",
     "charge_start": "TIMESTAMP",
     "charge_end": "TIMESTAMP",
     "currency": "VARCHAR",
     "cost_raw": "VARCHAR",
     "cost": SQL_MONEY,
+    "billed_precision": "VARCHAR",
     "gross_cost": SQL_MONEY,
     "effective_cost": SQL_MONEY,
     "list_cost": SQL_MONEY,

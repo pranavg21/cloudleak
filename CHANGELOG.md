@@ -20,12 +20,12 @@ keys or a 20 MiB upload cap.
 - `cloudleak redact` / `resolve`: keyed pseudonymization with a column registry and a residual-identifier
   gate; fail-closed.
 - `cloudleak demo`, `checks`, `rules`, `schema`.
-- Adapters: AWS CUR legacy and 2.0 (CSV, gzip, Parquet, manifests), Azure EA/MCA actual and amortized
-  (manifests), GCP standard and detailed, FOCUS 1.0 to 1.4.
+- Adapters for AWS CUR legacy and 2.0, Azure Cost Management actual and amortized, GCP standard and
+  detailed usage costs, and FOCUS Cost and Usage. Tests include synthetic FOCUS 1.0 through 1.4 headers.
 - `cloudleak.finding.v1` evidence contract with an L1-L5 ladder and a Level-2 ceiling for billing data.
 - Eight Level-2 billing-signature rules (idle IPv4, NAT processing, cross-zone transfer, log ingestion,
   snapshots, unused commitments, gp2 volumes, extended support).
-- DuckDB engine: exact DECIMAL arithmetic, bounded memory with disk spill, file-access sandbox, no
+- DuckDB engine: DECIMAL amounts, a configurable DuckDB memory budget with disk spill, file-access sandbox, no
   extension downloads.
 - GitHub Action, Dockerfile, CI on Linux/macOS/Windows and Python 3.10-3.13, trusted-publishing release
   workflow with SBOM and provenance attestations.
