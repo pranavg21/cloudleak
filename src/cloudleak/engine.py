@@ -4,7 +4,7 @@ The connection is locked down before any file is read:
 
 * extension auto-install and auto-load are off (no network fetches),
 * file access is restricted to the input directories and the spill directory,
-* memory is capped and large queries spill to a temporary directory,
+* DuckDB limits its managed buffers and spills eligible queries to a temporary directory,
 * the session time zone is UTC, so no laptop time zone shifts a period,
 * configuration is locked once loading finishes.
 
@@ -20,6 +20,7 @@ import gzip
 import io
 import os
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,11 +31,47 @@ from cloudleak.errors import InputError
 from cloudleak.money import SQL_MONEY
 from cloudleak.providers import ADAPTERS, detect
 from cloudleak.providers import azure as azure_adapter
-from cloudleak.providers.base import CANONICAL_TYPES, Columns, Mapping, quote_ident, sql_str
+from cloudleak.providers import gcp as gcp_adapter
+from cloudleak.providers.base import CANONICAL_TYPES, Columns, Mapping, norm, quote_ident, sql_str
 from cloudleak.sources import Discovery, SourceFile, discover
 
+_RESOURCE_ERRORS = (duckdb.OutOfMemoryException, duckdb.PermissionException, duckdb.IOException)
+
+
+def _resource_error(exc: duckdb.Error) -> InputError:
+    reason = str(exc).splitlines()[0][:400]
+    if isinstance(exc, duckdb.OutOfMemoryException):
+        return InputError(reason, hint="Increase --memory-limit or reduce --threads and ensure --temp-dir has space.")
+    return InputError(reason, hint="Check file access, permissions and space in --temp-dir.")
+
+
 MACROS = [
-    f"CREATE OR REPLACE MACRO cl_money(x) AS TRY_CAST(NULLIF(TRIM(x), '') AS {SQL_MONEY})",
+    gcp_adapter.CREDIT_JSON_MACRO,
+    # Place the decimal point in a bounded significant-digit string. This
+    # handles a large mantissa with a negative exponent without overflowing
+    # an intermediate DECIMAL cast or rounding through a floating type.
+    """CREATE MACRO cl_shift_decimal(digits, power) AS CASE
+        WHEN digits = '' THEN '0'
+        WHEN power >= -12 AND length(digits) + power <= 26 THEN
+          CASE WHEN power >= 0 THEN digits || repeat('0', power)
+               WHEN length(digits) + power <= 0
+               THEN '0.' || repeat('0', -(length(digits) + power)) || digits
+               ELSE left(digits, length(digits) + power) || '.' || right(digits, -power) END END""",
+    """CREATE MACRO cl_scientific_digits(digits, power) AS
+        cl_shift_decimal(trim(digits, '0'), power + length(digits) - length(rtrim(digits, '0')))""",
+    """CREATE MACRO cl_scientific_parts(mantissa, exponent) AS
+        cl_scientific_digits(replace(mantissa, '.', ''), exponent - length(split_part(mantissa, '.', 2)))""",
+    """CREATE MACRO cl_scientific_money(x) AS
+        (CASE WHEN left(x, 1) = '-' THEN '-' ELSE '' END) ||
+        cl_scientific_parts(ltrim(split_part(lower(x), 'e', 1), '+-'), try_cast(split_part(lower(x), 'e', 2)
+                            AS INTEGER)::BIGINT)""",
+    # DuckDB's DECIMAL cast rounds excess scale. Only cast when no nonzero
+    # digits will be discarded. Expand scientific notation exactly first.
+    f"""CREATE OR REPLACE MACRO cl_money(x) AS CASE
+        WHEN regexp_full_match(x, '[+-]?([0-9]+([.][0-9]{{0,12}}0*)?|[.][0-9]{{1,12}}0*)')
+        THEN TRY_CAST(x AS {SQL_MONEY})
+        WHEN regexp_full_match(x, '[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)[eE][+-]?[0-9]+')
+        THEN TRY_CAST(cl_scientific_money(x) AS {SQL_MONEY}) END""",
     # Timestamps: ISO 8601 (with or without zone), BigQuery's '... UTC',
     # Azure's MM/DD/YYYY, and compact YYYYMMDD. Zoned values become UTC.
     """CREATE OR REPLACE MACRO cl_ts(x) AS COALESCE(
@@ -102,6 +139,7 @@ class LoadedSource:
             "dataset": m.dataset if m else None,
             "cost_basis": m.cost_basis if m else None,
             "focus_version": m.focus_version if m else None,
+            "focus_version_evidence": "column-derived lower bound" if m and m.focus_version else None,
             "detection_score": self.confidence,
             "basis_evidence": self.basis_evidence,
             "capabilities": dict(sorted((m.capabilities if m else {}).items())),
@@ -141,6 +179,60 @@ def _read_header(src: SourceFile) -> tuple[list[str], str]:
     return best
 
 
+def _parquet_projection(description: list) -> str:
+    """Expose known nested GCP fields and serialize repeated records without rounding amounts."""
+    names = {norm(name) for name, *_ in description}
+    gcp = "cost" in names and bool({"service", "service_description", "sku", "sku_description"} & names)
+    exprs = []
+    for name, typ, *_ in description:
+        key, q = norm(name), quote_ident(name)
+        expr = q
+        if gcp and typ.id == "struct" and key in gcp_adapter.STRUCT_FIELDS:
+            for child, _ in typ.children:
+                if child not in gcp_adapter.STRUCT_FIELDS[key]:
+                    continue
+                alias = f"{key}.{child}"
+                if norm(alias) in names:
+                    raise InputError(f"Ambiguous GCP field {alias} in both nested and flat columns")
+                names.add(norm(alias))
+                field = f"struct_extract({q}, {sql_str(child)})"
+                exprs.append(f"CAST({field} AS VARCHAR) AS {quote_ident(alias)}")
+        if typ.id in {"map", "struct", "list", "array"}:
+            expr = f"to_json({expr})"
+        exprs.append(f"CAST({expr} AS VARCHAR) AS {q}")
+    return ", ".join(exprs)
+
+
+def _parquet_money_precision(description: list, mapping: Mapping) -> None:
+    """Preserve the source precision of amounts used in a billed comparison."""
+    limits = {"float": 2**17, "double": 2**46}
+    coarse, approximate = [], []
+    approximate_secondary = False
+    for name, typ, *_ in description:
+        ref = quote_ident(name)
+        if typ.id in limits and (ref in mapping.effective_cost or ref in mapping.list_cost):
+            approximate_secondary = True
+        if ref not in mapping.cost:
+            continue
+        if typ.id in limits:
+            coarse.append(f"abs(try_cast({ref} AS DOUBLE)) >= {limits[typ.id]}")
+            approximate.append(f"{ref} IS NOT NULL")
+        elif norm(name) == "credits" and typ.id == "list" and typ.children[0][1].id == "struct":
+            for child, amount_type in typ.children[0][1].children:
+                if child == "amount" and amount_type.id in limits:
+                    values = f"json_extract_string({ref}, '$[*].amount')"
+                    coarse.append(f"list_max(list_transform({values}, lambda v: abs(try_cast(v AS DOUBLE)))) "
+                                  f">= {limits[amount_type.id]}")
+                    approximate.append(f"len({values}) > 0")
+    if approximate:
+        mapping.billed_precision = (f"CASE WHEN {' OR '.join(coarse)} THEN 'cent_resolution_lost' "
+                                    f"WHEN {' OR '.join(approximate)} THEN 'binary_float' ELSE 'decimal' END")
+        mapping.notes.append("Parquet stores a billed amount or credit as binary floating point. "
+                             "Decimal totals compare the stored values and can differ from producer amounts.")
+    if approximate_secondary:
+        mapping.notes.append("A Parquet input to effective or list cost uses binary floating-point precision.")
+
+
 class Workspace:
     """Load, normalize and query billing exports inside a locked DuckDB session."""
 
@@ -152,20 +244,39 @@ class Workspace:
         threads: int | None = None,
         temp_dir: str | None = None,
         allow_unknown: bool = False,
+        independent_inputs: bool = False,
         max_decompressed: int = 64 << 30,
     ):
         self.discovery: Discovery = discover(paths, max_decompressed=max_decompressed)
-        self._tmp = tempfile.TemporaryDirectory(prefix="cloudleak-", dir=temp_dir)
-        spill = Path(self._tmp.name)
-        config: dict[str, Any] = {
-            "autoinstall_known_extensions": False,
-            "autoload_known_extensions": False,
-            "memory_limit": memory_limit,
-            "temp_directory": str(spill),
-        }
-        if threads:
-            config["threads"] = int(threads)
-        self.con = duckdb.connect(":memory:", config=config)
+        if threads is not None and threads < 1:
+            raise InputError("--threads must be a positive integer")
+        with ExitStack() as cleanup:
+            self._tmp = tempfile.TemporaryDirectory(prefix="cloudleak-", dir=temp_dir)
+            cleanup.callback(self._tmp.cleanup)
+            spill = Path(self._tmp.name)
+            config: dict[str, Any] = {
+                "autoinstall_known_extensions": False,
+                "autoload_known_extensions": False,
+                "memory_limit": memory_limit,
+                "temp_directory": str(spill),
+            }
+            if threads is not None:
+                config["threads"] = threads
+            try:
+                self.con = duckdb.connect(":memory:", config=config)
+            except _RESOURCE_ERRORS as exc:
+                raise _resource_error(exc) from exc
+            except duckdb.Error as exc:
+                raise InputError(f"invalid DuckDB configuration: {exc}",
+                                 hint="Check --memory-limit (for example 2GB) and --threads.") from exc
+            cleanup.callback(self.con.close)
+            try:
+                self._initialize(spill, allow_unknown, paths if independent_inputs else [])
+            except _RESOURCE_ERRORS as exc:
+                raise _resource_error(exc) from exc
+            cleanup.pop_all()
+
+    def _initialize(self, spill: Path, allow_unknown: bool, independent_paths: list[str | os.PathLike]) -> None:
         allowed = sorted({str(r) for r in self.discovery.roots} | {str(spill)})
         self.con.execute(f"SET allowed_directories = [{', '.join(sql_str(a) for a in allowed)}]")
         self.con.execute("SET enable_external_access = false")
@@ -184,6 +295,11 @@ class Workspace:
                 "Azure cost exports (EA/MCA, actual and amortized), GCP billing exports, FOCUS 1.0-1.4.",
             )
         self._build_canonical()
+        if independent_paths:
+            for path in independent_paths:
+                self._check_dataset_overlap(self.source_ids_for(path))
+        else:
+            self._check_dataset_overlap([s.file.source_id for s in self.recognized])
         self.con.execute("SET lock_configuration = true")
 
     # -- loading -----------------------------------------------------------
@@ -193,7 +309,9 @@ class Workspace:
         issues: list[str] = []
         try:
             if src.fmt == "parquet":
-                select = ", ".join(self._parquet_columns(path))
+                relation = self.con.sql(f"SELECT * FROM read_parquet({path}) LIMIT 0")
+                description = list(zip(relation.columns, relation.types))
+                select = _parquet_projection(description)
                 self.con.execute(
                     f"CREATE TABLE {table} AS SELECT row_number() OVER () AS __cl_row, {select} "
                     f"FROM read_parquet({path})"
@@ -203,7 +321,8 @@ class Workspace:
                 blank = [i + 1 for i, h in enumerate(header) if not h.strip()]
                 if blank:
                     raise InputError(f"{src.display_name}: header has blank column name(s) at position {blank}")
-                dupes = sorted({h for h in header if header.count(h) > 1})
+                folded = [h.casefold() for h in header]
+                dupes = sorted({h for h in header if folded.count(h.casefold()) > 1})
                 if dupes:
                     raise InputError(
                         f"{src.display_name}: duplicate column names {dupes[:5]}; the cost column is ambiguous"
@@ -216,6 +335,8 @@ class Workspace:
                     f"columns={{{columns}}}, strict_mode=true, null_padding=false, encoding={enc}, "
                     f"ignore_errors=false)"
                 )
+        except _RESOURCE_ERRORS:
+            raise
         except duckdb.Error as exc:
             msg = str(exc).splitlines()[0][:400]
             raise InputError(
@@ -231,48 +352,62 @@ class Workspace:
         mapping = None
         basis_evidence = None
         if name == "azure":
-            hint = azure_adapter.basis_from_name(str(src.path.relative_to(self._root_of(src.path))))
-            basis_evidence = "file or folder name" if hint else None
-            if hint is None:
-                q = azure_adapter.infer_basis_sql(table, cols)
-                hint = self.con.execute(q).fetchone()[0] if q else None
-                basis_evidence = "charge types in the data" if hint else None
+            root = self._root_of(src.path)
+            # Include the basename of the discovery root: explicit file arguments
+            # have their parent as root. Do not use unrelated absolute ancestors.
+            hint = azure_adapter.basis_from_name(str(Path(root.name) / src.path.relative_to(root)))
+            q = azure_adapter.infer_basis_sql(table, cols)
+            data_hint = self.con.execute(q).fetchone()[0] if q else None
+            if "conflict" in (hint, data_hint) or (hint and data_hint and hint != data_hint):
+                hint, basis_evidence = None, "conflicting file name or charge type evidence"
+            elif hint:
+                basis_evidence = "file or folder name"
+            elif data_hint:
+                hint, basis_evidence = data_hint, "charge types in the data"
             mapping = azure_adapter.build(cols, basis_hint=hint)
         elif name is not None:
             mapping = ADAPTERS[name].build(cols)
+        if mapping is not None and src.fmt == "parquet":
+            _parquet_money_precision(description, mapping)
         return LoadedSource(src, table, rows, cols.original, name, score, mapping, basis_evidence, issues)
-
-    def _parquet_columns(self, path: str) -> list[str]:
-        """VARCHAR projections for a Parquet file.
-
-        STRUCT columns are flattened into dotted names (``service.description``), matching
-        the flattened CSV spelling, because BigQuery and other warehouses keep billing
-        records nested. LIST and MAP columns become JSON text (GCP ``credits``, ``labels``;
-        CUR 2.0 ``resource_tags``).
-        """
-        out: list[str] = []
-
-        def visit(expr: str, name: str, typ: str) -> None:
-            t = typ.upper().strip()
-            if t.endswith("]") or t.startswith(("MAP(", "LIST", "UNION(")):
-                out.append(f"CAST(to_json({expr}) AS VARCHAR) AS {quote_ident(name)}")
-            elif t.startswith("STRUCT("):
-                fields = self.con.execute(
-                    f"DESCRIBE SELECT unnest({expr}) FROM read_parquet({path}) LIMIT 0").fetchall()
-                for child, ctyp, *_ in fields:
-                    visit(f"struct_extract({expr}, {sql_str(child)})", f"{name}.{child}", ctyp)
-            else:
-                out.append(f"CAST({expr} AS VARCHAR) AS {quote_ident(name)}")
-
-        for name, typ, *_ in self.con.execute(f"DESCRIBE SELECT * FROM read_parquet({path})").fetchall():
-            visit(quote_ident(name), name, typ)
-        return out
 
     def _root_of(self, path: Path) -> Path:
         for root in sorted(self.discovery.roots, key=lambda r: len(str(r)), reverse=True):
             if root == path or root in path.parents:
                 return root
         return path.parent
+
+    def source_ids_for(self, path: str | os.PathLike) -> list[int]:
+        resolved = Path(path).expanduser().resolve()
+        return [s.file.source_id for s in self.sources if s.file.path == resolved or resolved in s.file.path.parents]
+
+    def _check_dataset_overlap(self, source_ids: list[int]) -> None:
+        """A detailed GCP export, native bill, or FOCUS export may describe the same charges."""
+        adapters = {s.mapping.dataset for s in self.recognized if s.file.source_id in source_ids}
+        gcp_pair = {"gcp_standard", "gcp_detailed"} <= adapters
+        focus_pair = any(d.startswith("focus_") for d in adapters) and any(not d.startswith("focus_") for d in adapters)
+        if not (gcp_pair or focus_pair):
+            return
+        overlap = self.rows("""
+            WITH scopes AS (
+                SELECT DISTINCT provider, dataset, billing_account_id, billing_period_start
+                FROM li WHERE source_id IN (SELECT unnest(?)) AND cost_basis = 'billed'
+            )
+            SELECT a.dataset AS left_view, b.dataset AS right_view
+            FROM scopes a JOIN scopes b ON a.dataset < b.dataset
+              AND (a.provider = b.provider OR a.provider = 'focus' OR b.provider = 'focus')
+              AND (a.billing_account_id = b.billing_account_id OR a.billing_account_id IS NULL
+                   OR b.billing_account_id IS NULL)
+              AND (a.billing_period_start = b.billing_period_start OR a.billing_period_start IS NULL
+                   OR b.billing_period_start IS NULL)
+            WHERE (a.dataset = 'gcp_detailed' AND b.dataset = 'gcp_standard')
+               OR (starts_with(a.dataset, 'focus_') <> starts_with(b.dataset, 'focus_'))
+            LIMIT 1
+        """, [source_ids])
+        if overlap:
+            row = overlap[0]
+            raise InputError(f"Overlapping billing scopes in {row['left_view']} and {row['right_view']}",
+                             hint="Supply one export view per provider, billing account and invoice month.")
 
     def _build_canonical(self) -> None:
         selects = []
@@ -289,8 +424,18 @@ class Workspace:
         else:
             try:
                 self.con.execute("CREATE TABLE li AS " + "\nUNION ALL\n".join(selects))
+            except _RESOURCE_ERRORS:
+                raise
             except duckdb.Error as exc:
                 raise InputError(f"normalization failed: {str(exc).splitlines()[0][:400]}") from exc
+        aws = {s.file.source_id: s.mapping for s in self.recognized if s.detected == "aws"}
+        if aws:
+            coverage = self.con.execute("""
+                SELECT source_id, count(effective_cost) = count(*) FROM li
+                WHERE source_id IN (SELECT unnest(?)) GROUP BY source_id
+            """, [list(aws)]).fetchall()
+            for source_id, complete in coverage:
+                aws[source_id].capabilities["effective_cost"] = complete
         category_sql = SERVICE_CATEGORY_SQL.replace(" t LIKE", " signature_text LIKE").replace(
             "(t LIKE", "(signature_text LIKE")
         self.con.execute(f"""
@@ -333,8 +478,10 @@ class Workspace:
     def __enter__(self) -> Workspace:
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+        if isinstance(exc, _RESOURCE_ERRORS):
+            raise _resource_error(exc) from exc
 
     def duckdb_version(self) -> str:
         return duckdb.__version__

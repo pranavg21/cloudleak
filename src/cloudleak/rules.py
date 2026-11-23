@@ -43,6 +43,7 @@ class Rule:
     false_positives: tuple[str, ...]
     verify: Callable[[dict], list[VerificationStep]]
     amount: str = "cost"  # SQL for the observed amount
+    amount_basis: str = "cost_basis"
     severity: str = "medium"
     providers: tuple[str, ...] = ("aws", "azure", "gcp", "focus")
     docs: tuple[str, ...] = field(default_factory=tuple)
@@ -51,7 +52,7 @@ class Rule:
 
     def fingerprint(self) -> dict:
         return {"id": self.rule_id, "where": " ".join(self.where.split()), "group": self.group,
-                "amount": self.amount}
+                "amount": self.amount, "amount_basis": self.amount_basis, "prefer_basis": self.prefer_basis}
 
 
 def _region(r: dict) -> str:
@@ -280,17 +281,20 @@ RULES: list[Rule] = [
     ),
     Rule(
         "CL-SIG-006", "unused-commitment", "Unused commitment charges",
-        """(provider = 'aws' AND charge_raw = 'RIFee' AND commitment_status = 'unused')
-           OR (provider = 'azure' AND lower(charge_raw) IN ('unusedreservation', 'unusedsavingsplan'))
-           OR (provider NOT IN ('aws','azure') AND commitment_status = 'unused')""",
+        """(starts_with(dataset, 'focus') AND commitment_status = 'unused')
+           OR (starts_with(dataset, 'aws_cur') AND charge_raw = 'RIFee' AND commitment_status = 'unused')
+           OR (starts_with(dataset, 'azure_') AND lower(charge_raw) IN ('unusedreservation', 'unusedsavingsplan'))""",
         "resource",
         "The bill explicitly attributes this amount to commitment capacity that no usage consumed.",
         ("Planned usage that will absorb the commitment later in its term",
          "Exchange, instance-size-flexibility or resale options"),
         ("Commitments bought ahead of a planned ramp-up", "Temporary dips in covered usage"),
         _verify_commitment, severity="medium", prefer_basis="amortized",
-        amount="CASE WHEN provider = 'aws' THEN effective_cost "
-               "WHEN provider NOT IN ('aws','azure') THEN COALESCE(effective_cost, cost) ELSE cost END",
+        amount="CASE WHEN starts_with(dataset, 'aws_cur') THEN effective_cost "
+               "WHEN starts_with(dataset, 'focus') THEN COALESCE(effective_cost, cost) ELSE cost END",
+        amount_basis="CASE WHEN starts_with(dataset, 'aws_cur') "
+                     "OR (starts_with(dataset, 'focus') AND effective_cost IS NOT NULL) "
+                     "THEN 'effective' ELSE cost_basis END",
     ),
     Rule(
         "CL-SIG-007", "aws-ebs-gp2", "EBS gp2 volume charges (storage-tier review)",
@@ -330,11 +334,15 @@ def run_rules(ws: Workspace, *, min_cost: Decimal = Decimal("1"), max_per_rule: 
         else:
             key = "''"
         rows = ws.rows(f"""
+            WITH matched AS (
+                SELECT *, {key} AS rkey, {rule.amount} AS observed, {rule.amount_basis} AS observed_basis
+                FROM valid WHERE ({rule.where})
+            )
             SELECT provider, billing_account_id, sub_account_id, any_value(sub_account_name) AS sub_account_name,
-                   billing_period, currency, cost_basis, region, any_value(service) AS service,
-                   {key} AS rkey, NULLIF({key}, '') AS resource_id,
-                   sum({rule.amount}) AS amount, sum(cost) AS billed,
-                   sum(effective_cost) AS effective,
+                   billing_period, currency, cost_basis, observed_basis, region, any_value(service) AS service,
+                   rkey, NULLIF(rkey, '') AS resource_id,
+                   sum(observed) AS amount, sum(cost) FILTER (WHERE cost_basis = 'billed') AS billed,
+                   CASE WHEN count(effective_cost) = count(*) THEN sum(effective_cost) END AS effective,
                    sum(usage_quantity) AS quantity, any_value(usage_unit) AS unit,
                    count(*) AS n,
                    list(DISTINCT source_id ORDER BY source_id) AS sources,
@@ -342,16 +350,18 @@ def run_rules(ws: Workspace, *, min_cost: Decimal = Decimal("1"), max_per_rule: 
                    (list(struct_pack(s := source_id, r := source_row) ORDER BY source_id, source_row))[1:5]
                        AS samples,
                    arg_max(tags, cost) AS tags
-            FROM valid v
-            WHERE ({rule.where})
-              AND (cost_basis = ? OR NOT EXISTS (
-                    SELECT 1 FROM valid o
+            FROM matched v
+            WHERE (cost_basis = ? OR NOT EXISTS (
+                    SELECT 1 FROM matched o
                     WHERE o.cost_basis = ? AND o.provider = v.provider
+                      AND o.billing_account_id IS NOT DISTINCT FROM v.billing_account_id
                       AND o.sub_account_id IS NOT DISTINCT FROM v.sub_account_id
+                      AND o.currency IS NOT DISTINCT FROM v.currency
+                      AND o.region IS NOT DISTINCT FROM v.region AND o.rkey = v.rkey
                       AND o.billing_period IS NOT DISTINCT FROM v.billing_period))
-            GROUP BY provider, billing_account_id, sub_account_id, billing_period, currency, cost_basis, region,
-                     rkey
-            HAVING sum({rule.amount}) >= ?
+            GROUP BY provider, billing_account_id, sub_account_id, billing_period, currency, cost_basis,
+                     observed_basis, region, rkey
+            HAVING count(observed) = count(*) AND sum(observed) >= ?
             ORDER BY amount DESC, rkey, billing_period
         """, [rule.prefer_basis, rule.prefer_basis, min_cost])
         for r in rows[:max_per_rule]:
@@ -367,8 +377,9 @@ def run_rules(ws: Workspace, *, min_cost: Decimal = Decimal("1"), max_per_rule: 
                 provider=r["provider"], currency=r["currency"], billing_period=r["billing_period"],
                 period_finality=fin,
                 observed_cost=r["amount"],
+                observed_billed_cost=r["billed"],
                 observed_effective_cost=r["effective"],
-                cost_basis=r["cost_basis"],
+                cost_basis=r["observed_basis"],
                 billing_account_id=r["billing_account_id"], sub_account_id=r["sub_account_id"],
                 resource_id=r["resource_id"],
                 resource_id_source="billing_line_item" if r["resource_id"] else None,

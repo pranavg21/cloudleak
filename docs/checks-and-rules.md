@@ -13,7 +13,7 @@ Generated from `cloudleak checks`. IDs are stable and never reused, so CI can ga
 | `CL-ING-007` | ingestion | Decimal precision preserved | Cost values with more than 12 decimal places are rounded at the 12th place. |
 | `CL-ING-008` | ingestion | Unambiguous column names | No two columns normalize to the same name. |
 | `CL-ACC-001` | accounting | Single currency per total | Totals are never summed across currencies; rows without a currency are flagged. |
-| `CL-ACC-002` | accounting | Billing period finality | Whether each period is finalized (invoice issued) or a preliminary estimate. |
+| `CL-ACC-002` | accounting | Billing period finality | Finality evidence for each billing period, including cases where invoice issuance is unknown. |
 | `CL-ACC-003` | accounting | Full-period coverage | Whether each billing period contains usage for every day of the month. |
 | `CL-ACC-004` | accounting | Cost basis not mixed | Azure actual and amortized exports for the same scope are reported separately, never summed. |
 | `CL-ACC-005` | accounting | Charge composition | Tax, credits, refunds, discounts, fees and purchases are separated from usage. |

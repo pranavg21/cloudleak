@@ -12,6 +12,7 @@ import gzip
 import hashlib
 import json
 import os
+import stat
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,22 +96,23 @@ def _sha256(path: Path) -> str:
 
 def _check_gzip(path: Path, size: int, max_bytes: int) -> int:
     """Stream-decompress to detect bombs and truncation. Returns decompressed size."""
-    limit = min(max_bytes, max(size, 1) * MAX_RATIO)
+    ratio_limit = max(size, 1) * MAX_RATIO
+    limit = min(max_bytes, ratio_limit)
     total = 0
     try:
         with gzip.open(path, "rb") as fh:
-            for block in iter(lambda: fh.read(CHUNK), b""):
+            while block := fh.read(min(CHUNK, limit - total + 1)):
                 total += len(block)
                 if total > limit:
+                    if max_bytes <= ratio_limit:
+                        raise InputError(f"{path.name}: exceeds the decompression budget of {max_bytes:,} bytes",
+                                         hint="Check the export or increase --max-decompressed-gb.")
                     raise InputError(
-                        f"{path.name}: decompresses past {limit:,} bytes "
-                        f"(ratio limit {MAX_RATIO}:1 or --max-decompressed). Refusing a possible "
-                        "decompression bomb.",
-                        hint="If this is a genuine export, raise --max-decompressed.",
+                        f"{path.name}: exceeds the decompression ratio limit of {MAX_RATIO}:1. "
+                        "Refusing a possible decompression bomb.",
+                        hint="Check the export and supply a regular uncompressed CSV if it is genuine.",
                     )
-    except (EOFError, zlib.error, gzip.BadGzipFile, OSError) as exc:
-        if isinstance(exc, InputError):
-            raise
+    except (EOFError, zlib.error, gzip.BadGzipFile) as exc:
         raise InputError(
             f"{path.name}: compressed stream is truncated or corrupt ({exc}).",
             hint="Download the file again; partial transfers are common for large exports.",
@@ -127,56 +129,59 @@ def _sniff_encoding(path: Path, fmt: str) -> str:
     return "utf-8"
 
 
-def _parse_manifest(path: Path) -> Manifest | None:
+def _parse_manifest(path: Path) -> Manifest:
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as stream:
+            raw = stream.read(64 * 1024 * 1024 + 1)
         if len(raw) > 64 * 1024 * 1024:
             raise InputError(f"{path.name}: manifest larger than 64 MiB")
         doc = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise InputError(f"{path.name}: manifest is not valid JSON ({exc}).") from exc
     if not isinstance(doc, dict):
-        return None
+        raise InputError(f"{path.name}: expected a JSON object in the manifest")
     sha = hashlib.sha256(raw).hexdigest()
 
     def base(key: str) -> str:
         return key.rstrip("/").rsplit("/", 1)[-1]
 
-    # AWS legacy CUR manifest: reportKeys + assemblyId + billingPeriod
-    if "reportKeys" in doc:
-        period = (doc.get("billingPeriod") or {}).get("start")
-        cols = [
-            f"{c.get('category')}/{c.get('name')}" for c in doc.get("columns", []) if isinstance(c, dict)
-        ]
-        keys = [str(k) for k in doc.get("reportKeys", [])]
-        ident = "|".join(str(doc.get(k, "")) for k in ("account", "reportName", "reportId"))
-        return Manifest(
-            path, "aws_cur_legacy", sha, [base(k) for k in keys], keys=keys, identity=ident,
-            billing_period=_yyyymm(period), columns=cols,
-        )
-    # AWS Data Exports (CUR 2.0 / FOCUS) manifest: dataFiles + executionId
-    if "dataFiles" in doc:
-        period = (doc.get("billingPeriod") or {}).get("start")
-        cols = [c.get("name") for c in doc.get("columns", []) if isinstance(c, dict) and c.get("name")]
-        keys = [str(k) for k in doc.get("dataFiles", [])]
-        ident = "|".join(str(doc.get(k, "")) for k in ("account", "exportArn", "exportName", "reportName"))
-        return Manifest(
-            path, "aws_data_exports", sha, [base(k) for k in keys], keys=keys, identity=ident,
-            billing_period=_yyyymm(period), columns=cols,
-        )
+    # AWS legacy CUR uses reportKeys and AWS Data Exports uses dataFiles.
+    if "reportKeys" in doc or "dataFiles" in doc:
+        key = "reportKeys" if "reportKeys" in doc else "dataFiles"
+        entries = doc[key]
+        if not isinstance(entries, list) or not all(isinstance(entry, str) and entry for entry in entries):
+            raise InputError(f"{path.name}: manifest {key} must be an array of filenames")
+        billing_period = doc.get("billingPeriod") or {}
+        columns = doc.get("columns") or []
+        if not isinstance(billing_period, dict) or not isinstance(columns, list):
+            raise InputError(f"{path.name}: invalid billingPeriod or columns in manifest")
+        period = _yyyymm(billing_period.get("start"))
+        if key == "reportKeys":
+            kind = "aws_cur_legacy"
+            cols = [f"{c.get('category')}/{c.get('name')}" for c in columns if isinstance(c, dict)]
+            ident = "|".join(str(doc.get(k, "")) for k in ("account", "reportName", "reportId"))
+        else:
+            kind = "aws_data_exports"
+            cols = [c["name"] for c in columns if isinstance(c, dict) and isinstance(c.get("name"), str)]
+            ident = "|".join(str(doc.get(k, "")) for k in ("account", "exportArn", "exportName", "reportName"))
+        return Manifest(path, kind, sha, [base(k) for k in entries], billing_period=period, columns=cols,
+                        keys=list(entries), identity=ident)
     # Azure Cost Management export manifest: blobs[] with dataRowCount
-    if "blobs" in doc and isinstance(doc.get("blobs"), list):
+    if "blobs" in doc:
+        if not isinstance(doc["blobs"], list):
+            raise InputError(f"{path.name}: manifest blobs must be an array")
         files, counts, keys = [], {}, []
         for blob in doc["blobs"]:
-            if not isinstance(blob, dict) or "blobName" not in blob:
-                continue
-            keys.append(str(blob["blobName"]))
-            name = base(str(blob["blobName"]))
+            if not isinstance(blob, dict) or not isinstance(blob.get("blobName"), str) or not blob["blobName"]:
+                raise InputError(f"{path.name}: each manifest blob must include a filename")
+            keys.append(blob["blobName"])
+            name = base(blob["blobName"])
             files.append(name)
             if isinstance(blob.get("dataRowCount"), int):
                 counts[name] = blob["dataRowCount"]
         cfg = doc.get("exportConfig") or {}
-        period = (cfg.get("timePeriod") or {}).get("from") if isinstance(cfg, dict) else None
+        time_period = cfg.get("timePeriod") if isinstance(cfg, dict) else None
+        period = time_period.get("from") if isinstance(time_period, dict) else None
         ident = "|".join(str(cfg.get(k, "")) for k in ("exportName", "resourceId")) if isinstance(cfg, dict) else ""
         return Manifest(
             path, "azure_cost_export", sha, files, counts, keys=keys, identity=ident,
@@ -211,17 +216,25 @@ def discover(paths: list[str | os.PathLike], *, max_decompressed: int = 64 << 30
     """
     if not paths:
         raise InputError("no input paths given")
+    if max_decompressed < 1:
+        raise InputError("the decompression budget must be at least one byte")
     candidates: list[Path] = []
+    explicit_files: set[Path] = set()
     roots: list[Path] = []
     skipped: list[tuple[str, str]] = []
+
+    def walk_error(exc: OSError) -> None:
+        raise InputError(f"could not read input directory {exc.filename}: {exc.strerror}",
+                         hint="Check directory permissions and confirm the export is accessible.") from exc
+
     for raw in paths:
-        p = Path(raw).expanduser()
-        if not p.exists():
-            raise InputError(f"{raw}: no such file or directory")
-        p = p.resolve()
+        try:
+            p = Path(raw).expanduser().resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise InputError(f"{raw}: no such file or directory") from exc
         roots.append(p if p.is_dir() else p.parent)
         if p.is_dir():
-            for dirpath, dirnames, filenames in os.walk(p, followlinks=False):
+            for dirpath, dirnames, filenames in os.walk(p, onerror=walk_error, followlinks=False):
                 dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
                 for fn in sorted(filenames):
                     if fn.startswith("."):
@@ -234,29 +247,37 @@ def discover(paths: list[str | os.PathLike], *, max_decompressed: int = 64 << 30
                             continue
                     candidates.append(child)
         else:
+            explicit_files.add(p)
             candidates.append(p)
 
     files: list[SourceFile] = []
     manifests: list[Manifest] = []
-    seen: set[Path] = set()
+    seen: set[tuple[int, int]] = set()
     for path in candidates:
-        if path in seen:
-            continue
-        seen.add(path)
         lname = path.name.lower()
-        if lname in MANIFEST_NAMES or lname.endswith("-manifest.json"):
-            m = _parse_manifest(path)
-            if m is not None:
-                manifests.append(m)
-            continue
+        manifest = lname in MANIFEST_NAMES or lname.endswith("-manifest.json")
         fmt = _fmt_for(path)
-        if fmt is None:
+        if not manifest and fmt is None:
+            reason = "unsupported file type"
             if lname.endswith((".zip", ".tar", ".tgz", ".tar.gz", ".7z")):
-                skipped.append((path.name, "archives are not opened; extract them first"))
-            elif not lname.endswith((".json", ".md", ".txt", ".pdf")):
-                skipped.append((path.name, "unsupported file type"))
+                reason = "archives are not opened; extract them first"
+            if path in explicit_files:
+                raise InputError(f"{path}: {reason}",
+                                 hint="Supply a billing CSV, CSV.GZ, Parquet or recognized manifest.")
+            if not lname.endswith((".json", ".md", ".txt", ".pdf")):
+                skipped.append((path.name, reason))
             continue
-        size = path.stat().st_size
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise InputError(f"{path}: expected a regular input file")
+        identity = (info.st_dev, info.st_ino)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if manifest:
+            manifests.append(_parse_manifest(path))
+            continue
+        size = info.st_size
         if size == 0:
             raise InputError(f"{path.name}: file is empty")
         decompressed = None

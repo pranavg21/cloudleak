@@ -8,7 +8,7 @@ runs inside one local trust boundary: no cloud credentials, no network, no servi
         │
  Zone 1 │ sources.py   discover · SHA-256 · gzip bomb/truncation guard · parse manifests
         ▼
- Zone 2 │ engine.py    DuckDB (memory cap, spill dir, file sandbox, no extensions, UTC, locked config)
+ Zone 2 │ engine.py    DuckDB (memory budget, spill dir, file sandbox, no extensions, UTC, locked config)
         │              raw tables, all VARCHAR ──► provider adapters (SQL) ──► canonical line items
         │              doctor.py checks the raw and canonical data
         ▼
@@ -20,9 +20,9 @@ runs inside one local trust boundary: no cloud credentials, no network, no servi
 
 ## Why these choices
 
-**DuckDB, not pandas.** Billing exports run to gigabytes. DuckDB caps memory and spills to disk, reads
-gzip and Parquet directly, and keeps the audit logic as readable SQL. pandas holds whole frames in memory
-and its default type inference turns money into floats.
+**DuckDB.** Billing exports run to gigabytes. DuckDB reads gzip and Parquet directly and runs the audit
+logic as SQL. It can spill to disk under its configured memory budget. Peak process memory also includes
+allocations outside that budget.
 
 **Everything is read as text first.** Type inference is where billing tools quietly lose precision or
 misread `01/02/2026`. CloudLeak loads every column as VARCHAR and casts explicitly: money to
@@ -52,9 +52,9 @@ printed to PDF.
 | --- | --- |
 | `provider`, `dataset`, `cost_basis` | Who billed, which export family, billed or amortized |
 | `billing_account_id`, `sub_account_id`, `sub_account_name` | Payer / billing account and the account, subscription or project |
-| `invoice_id`, `billing_period_start` | Invoice scope (GCP: `invoice.month`) |
+| `invoice_id`, `billing_period_start` | Invoice scope. GCP `invoice.month` supplies the billing period. Use `--period` and `--billing-account` to select the payer and month. |
 | `charge_start`, `charge_end` | Usage interval in UTC |
-| `currency`, `cost`, `gross_cost`, `effective_cost`, `list_cost` | Exact amounts; `cost` is the invoiced amount for the basis; GCP `gross_cost` is before credits |
+| `currency`, `cost`, `gross_cost`, `effective_cost`, `list_cost` | Amounts use fixed-scale decimal arithmetic. Parquet floating-point sources carry precision limits. GCP `gross_cost` precedes credits and `cost` includes exported credits. |
 | `charge_category`, `charge_raw`, `charge_class` | usage, purchase, fee, tax, credit, refund, discount, adjustment, unknown; and the provider's own value |
 | `service`, `sku`, `sku_detail`, `resource_id`, `region` | What was used, and where |
 | `usage_quantity`, `usage_unit` | For rate versus volume decomposition |

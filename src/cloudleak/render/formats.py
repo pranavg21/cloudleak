@@ -8,6 +8,7 @@ import re
 from decimal import Decimal
 from xml.sax.saxutils import escape as xml_escape
 
+from cloudleak.analysis import totals_finality
 from cloudleak.money import display
 
 NUMERIC = re.compile(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
@@ -83,7 +84,7 @@ def audit_text(report: dict) -> str:
     for f in sig[:25]:
         where = f.get("resource_id") or f.get("sub_account_id") or "-"
         lines.append(f"  {f['rule_id']} {display(D(f['financials']['observed_cost']), f['currency']):>14}  "
-                     f"{f['provider']} {f['billing_period']} {where[:70]}")
+                     f"{f['financials']['cost_basis']}  {f['provider']} {f['billing_period']} {where[:70]}")
     if len(sig) > 25:
         lines.append(f"  ... {len(sig) - 25} more in the HTML/JSON output")
     if report.get("doctor"):
@@ -104,8 +105,7 @@ def markdown(report: dict) -> str:
         out += ["> **Preliminary estimate:** " + ", ".join(f"{p['provider']} {p['billing_period']}" for p in pre)
                 + " not finalized.", ""]
     out += ["## Totals", "", "| Provider | Period | Basis | Finality | Total |", "|---|---|---|---|---:|"]
-    fin = {(p["provider"], p["billing_period"], p["currency"], p["cost_basis"]): p["finality"]
-           for p in report["periods"]}
+    fin = totals_finality(report["periods"])
     for t in report["totals"]:
         f = fin.get((t["provider"], t["billing_period"], t["currency"], t["cost_basis"]), "unknown")
         out.append(f"| {md(t['provider'])} | {t['billing_period']} | {t['cost_basis']} | {f} | "
@@ -117,13 +117,14 @@ def markdown(report: dict) -> str:
                 if D(b["amount"]) != 0]
     sig = [f for f in report["findings"] if f["classification"] == "billing_signature_candidate"]
     out += ["", "## Billing-signature findings (Level 2)", "",
-            "Observed cost is what was billed, not a saving. Verify before acting.", "",
+            "Each amount uses the cost basis shown. Verify the billing signal before acting.", "",
             "| Rule | Provider | Period | Resource / scope | Observed | Owner |", "|---|---|---|---|---:|---|"]
     for f in sig[:100]:
         owner = owner_label(f.get("owner_routing"))
         out.append(f"| {f['rule_id']} {md(f['title'])} | {f['provider']} | {f['billing_period']} | "
                    f"`{md(f.get('resource_id') or f.get('sub_account_id') or '-')}` | "
-                   f"{display(D(f['financials']['observed_cost']), f['currency'])} | {md(owner)} |")
+                   f"{display(D(f['financials']['observed_cost']), f['currency'])} "
+                   f"{f['financials']['cost_basis']} | {md(owner)} |")
     if report.get("doctor"):
         bad = [c for c in report["doctor"]["results"] if c["status"] in ("WARN", "FAIL")]
         out += ["", f"## Data quality: {report['doctor']['status']}", ""]
@@ -140,7 +141,7 @@ def md(text: object) -> str:
 FINDING_COLUMNS = ["finding_id", "rule_id", "title", "evidence_level", "classification", "severity", "provider",
                    "billing_account_id", "sub_account_id", "resource_id", "region", "service", "billing_period",
                    "period_finality", "currency", "cost_basis", "observed_cost", "verified_savings", "owner",
-                   "summary", "verification_commands"]
+                   "summary", "verification_commands", "observed_billed_cost", "observed_effective_cost"]
 
 
 def findings_csv(report: dict) -> str:
@@ -154,7 +155,8 @@ def findings_csv(report: dict) -> str:
                f["provider"], f["billing_account_id"], f["sub_account_id"], f["resource_id"], f["region"],
                f["service"], f["billing_period"], f["period_finality"], f["currency"],
                f["financials"]["cost_basis"], f["financials"]["observed_cost"], "", owner.get("value") or "",
-               f["summary"], cmds]
+               f["summary"], cmds, f["financials"].get("observed_billed_cost"),
+               f["financials"].get("observed_effective_cost")]
         w.writerow([safe_cell(c) for c in row])
     return buf.getvalue()
 
@@ -177,7 +179,7 @@ def sarif(report: dict) -> dict:
             "message": {"text": f["summary"] + " Observed cost is not a saving; verify before acting."},
             "partialFingerprints": {"cloudleakFindingId": f["finding_id"]},
             "locations": locs or [{"physicalLocation": {"artifactLocation": {"uri": "billing-export"}}}],
-            "properties": {"observed_cost": f["financials"]["observed_cost"], "currency": f["currency"],
+            "properties": {**f["financials"], "currency": f["currency"],
                            "period_finality": f["period_finality"], "evidence_level": f["evidence_level"]},
         })
     for c in (report.get("doctor") or {}).get("results", []):
