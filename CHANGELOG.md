@@ -3,7 +3,7 @@
 All notable changes are documented here. This project uses semantic versioning; the
 `cloudleak.finding.v1` and `cloudleak.report.v1` schemas change version on any breaking change.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-23)
 
 CloudLeak is rebuilt as an offline command-line tool. The earlier Next.js upload UI and FastAPI job
 server are retired (preserved in history at `489fbff`): a local tool should not need a web server, API

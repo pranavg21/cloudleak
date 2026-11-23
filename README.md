@@ -35,16 +35,28 @@ by the published JSON Schema.
 
 ## Install
 
-Install from this source checkout with Python 3.10 or newer and uv. Run the following from the directory
-containing this README, with uv's tool executable directory on your PATH. [uv setup](https://docs.astral.sh/uv/guides/tools/)
+Python 3.10 or newer. The PyPI distribution is `cloudleak-cli`; the command is `cloudleak`.
 
 ```bash
-uv tool install .
+pipx install cloudleak-cli
+```
+
+or with uv:
+
+```bash
+uv tool install cloudleak-cli
+```
+
+Then check it:
+
+```bash
 cloudleak --version
 ```
 
-This quickstart installs the checkout pending the first PyPI release of `cloudleak-cli`.
-The PyPI project named `cloudleak` belongs to a different project.
+The PyPI project named `cloudleak` (without `-cli`) is an unrelated package. Releases are published only by
+this repository's release workflow through PyPI trusted publishing, with build provenance you can verify
+(see [SECURITY.md](SECURITY.md#supply-chain)). A container image is published as
+`ghcr.io/pranavg21/cloudleak`.
 
 ## Reconcile a synthetic invoice
 
