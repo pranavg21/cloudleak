@@ -131,7 +131,7 @@ def test_gcp_nested_parquet(tmp_path, capsys, detailed):
         "{'id':'SYN-K','description':'SKU'} AS sku, {'id':'SYN-A','name':'Project'} AS project, "
         "{'month':'202502'} AS invoice, TIMESTAMPTZ '2025-01-28 23:00:00+00' AS usage_start_time, "
         "'USD' AS currency, 10.75::DOUBLE AS cost, [{'amount': -1.25::DOUBLE},{'amount':-0.50::DOUBLE}] AS credits, "
-        "'regular' AS cost_type" + extra + ") TO ? (FORMAT parquet)", [str(p)])
+        "'regular' AS cost_type" + extra + ") TO '" + str(p).replace("'", "''") + "' (FORMAT parquet)")
     code, r = reconcile(capsys, [p], FEB, "9.00")
     assert r["export_total"] == "9.00" and r["difference"] == "0.00"
 
