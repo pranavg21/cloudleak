@@ -15,6 +15,7 @@ from cloudleak import variance as V
 from cloudleak.cli import main
 from cloudleak.doctor import run_doctor
 from cloudleak.engine import Workspace
+from cloudleak.errors import InputError
 from cloudleak.providers import focus
 from cloudleak.providers.azure import basis_from_name
 from cloudleak.providers.base import Columns
@@ -127,7 +128,7 @@ def test_d7_arn_resource_names_and_tag_values_do_not_leak(tmp_path):
 
 
 @pytest.mark.parametrize("col,expected", [
-    ("PartNumber", "SAFE"), ("project.ancestors", "DROP"), ("adjustment_info.mode", "SAFE"),
+    ("PartNumber", "TEXT"), ("project.ancestors", "DROP"), ("adjustment_info.mode", "TEXT"),
     ("x_CostCategories", "TAGS"), ("x_Discounts", "TEXT"), ("AccountOwnerId", "PSEUDO"),
     ("CustomerTenantId", "PSEUDO"), ("InvoiceSectionName", "PSEUDO"),
 ])
@@ -162,15 +163,16 @@ def test_d10_focus_charge_class_is_1_0():
                                                     "ChargeClass"])) == "1.0"
 
 
-def test_d11_period_reconcile_names_every_invoice(tmp_path):
+def test_d11_period_reconcile_refuses_a_period_spanning_several_invoices(tmp_path):
+    """AWS and AWS Marketplace invoices in one period: compare one invoice at a time, and say which exist."""
     rows = [aws_row(lid="1", bill_invoice_id="AWS-1", line_item_unblended_cost="100"),
             aws_row(lid="2", bill_invoice_id="MKT-1", line_item_unblended_cost="40")]
     p = write_csv(tmp_path / "x.csv", AWS_COLS, rows)
+    with Workspace([p]) as ws, pytest.raises(InputError, match="AWS-1, MKT-1"):
+        reconcile(ws, [Expectation(Decimal("100"), "USD", period="2026-07", provider="aws")])
     with Workspace([p]) as ws:
-        r = reconcile(ws, [Expectation(Decimal("100"), "USD", period="2026-07", provider="aws")])[0]
-    assert r.difference == Decimal(40)
-    assert any("spans 2 invoices" in n for n in r.notes)
-    assert not any("no tax lines" in n for n in r.notes)  # tax cannot explain an export that is higher
+        r = reconcile(ws, [Expectation(Decimal("100"), "USD", invoice_id="AWS-1")])[0]
+    assert r.difference == 0
 
 
 def test_concurrent_key_creation_yields_one_key(tmp_path):

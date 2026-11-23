@@ -25,15 +25,14 @@ SYNTHETIC_MARK = "SYNTHETIC_TEST_FIXTURE_ONLY"
 LIMITATIONS = [
     "Billing exports are historical ledgers. They cannot show whether a resource exists today, is attached, "
     "serves traffic, or is safe to change.",
-    "No finding carries a savings figure. Observed cost is what was billed in the period, not what can be "
-    "recovered.",
+    "Each observed cost uses the basis shown on its finding. Verified savings require separate evidence.",
     "Findings stop at evidence Level 2 (billing-supported hypothesis). Levels 3-5 need inventory snapshots, "
     "owner decisions and a later finalized bill.",
     "Owners are taken from tags or account names only; CloudLeak never guesses an owner.",
 ]
 
 CAN_CANNOT = [
-    ("What was billed, by period, currency, account, service and SKU; whether the period is final",
+    ("Costs recorded in the export by period, currency, account, service and SKU, with available finality evidence",
      "Proven by the export (Level 1)"),
     ("Charges whose billing line names a pattern: idle IPv4, NAT processing, unused commitment, "
      "extended support, gp2, snapshots, log ingestion",
@@ -59,9 +58,14 @@ def tool_info(ws: Workspace | None = None) -> dict:
     }
 
 
-def run_id(ws: Workspace, command: str, args: dict) -> str:
-    blob = json.dumps({"inputs": sorted(s.file.sha256 for s in ws.sources), "version": __version__,
-                       "rules": rule_pack_hash(), "command": command, "args": _jsonable(args)},
+def run_id(ws: Workspace, command: str, args: dict, *, after: Workspace | None = None) -> str:
+    def identity(snapshot: Workspace) -> dict:
+        return {"files": [s.to_dict() for s in snapshot.sources],
+                "manifests": [m.sha256 for m in snapshot.discovery.manifests],
+                "skipped": snapshot.discovery.skipped}
+
+    inputs = {"before": identity(ws), "after": identity(after)} if after else identity(ws)
+    blob = json.dumps({"inputs": inputs, "tool": tool_info(), "command": command, "args": _jsonable(args)},
                       sort_keys=True, default=str)
     return "clr_" + hashlib.sha256(blob.encode()).hexdigest()[:20]
 
@@ -79,13 +83,13 @@ def is_synthetic(ws: Workspace) -> bool:
 
 def build(ws: Workspace, *, command: str, args: dict, doctor: DoctorReport | None = None,
           findings: list[Finding] | None = None, bridges: list[Bridge] | None = None,
-          extra: dict[str, Any] | None = None) -> dict:
+          extra: dict[str, Any] | None = None, where: str = "TRUE") -> dict:
     rid = run_id(ws, command, args)
     tool = tool_info(ws)
     repro = {"cloudleak_version": tool["version"], "duckdb_version": tool["duckdb_version"],
              "rule_pack_hash": tool["rule_pack_hash"]}
     findings = sorted(findings or [], key=sort_key)
-    statuses = period_statuses(ws)
+    statuses = period_statuses(ws, where=where)
     by_rule: dict[str, int] = {}
     for f in findings:
         by_rule[f.rule_id] = by_rule.get(f.rule_id, 0) + 1
@@ -101,12 +105,12 @@ def build(ws: Workspace, *, command: str, args: dict, doctor: DoctorReport | Non
         "manifests": [m.to_dict() for m in ws.discovery.manifests],
         "skipped_files": [{"name": n, "reason": r} for n, r in ws.discovery.skipped],
         "periods": [s.to_dict() for s in statuses],
-        "totals": _jsonable(totals(ws)),
+        "totals": _jsonable(totals(ws, where=where)),
         "breakdowns": {
-            "service_category": _jsonable(breakdown(ws, "service_category", limit=12)),
-            "service": _jsonable(breakdown(ws, "service", limit=12)),
-            "sub_account_id": _jsonable(breakdown(ws, "sub_account_id", limit=12)),
-            "region": _jsonable(breakdown(ws, "region", limit=10)),
+            "service_category": _jsonable(breakdown(ws, "service_category", limit=12, where=where)),
+            "service": _jsonable(breakdown(ws, "service", limit=12, where=where)),
+            "sub_account_id": _jsonable(breakdown(ws, "sub_account_id", limit=12, where=where)),
+            "region": _jsonable(breakdown(ws, "region", limit=10, where=where)),
         },
         "doctor": None,
         "variance": [b.to_dict() | {"narrative": b.narrative()} for b in bridges] if bridges else None,

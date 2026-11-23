@@ -21,9 +21,10 @@ from cloudleak.analysis import period_statuses
 from cloudleak.engine import Workspace
 from cloudleak.errors import InputError
 from cloudleak.findings import Finding
-from cloudleak.money import ZERO, display, fmt
+from cloudleak.money import ZERO, display, fmt, money_context
+from cloudleak.providers.base import Columns, quote_ident
 
-AMOUNT_RE = re.compile(r"[+-]?[0-9]{1,24}(?:\.[0-9]{1,18})?")
+AMOUNT_RE = re.compile(r"[+-]?[0-9]{1,26}(?:\.[0-9]{1,18})?")
 PERIOD_RE = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])")
 
 
@@ -42,6 +43,8 @@ class Expectation:
     period: str | None = None
     provider: str | None = None
     label: str | None = None
+    issuer: str | None = None
+    billing_account: str | None = None
 
     def __post_init__(self) -> None:
         self.currency = self.currency.strip().upper()
@@ -69,6 +72,7 @@ class Result:
     excluded_amortized_rows: int
     finality: str
     providers: list[str]
+    tolerance: Decimal
     notes: list[str] = field(default_factory=list)
     invoices: list[dict] = field(default_factory=list)
 
@@ -76,11 +80,16 @@ class Result:
         e = self.expectation
         return {
             "invoice": {"invoice_id": e.invoice_id, "period": e.period, "provider": e.provider,
-                        "currency": e.currency, "total": fmt(e.total)},
+                        "currency": e.currency, "total": fmt(e.total), "issuer": e.issuer,
+                        "billing_account": e.billing_account},
             "status": self.status,
             "export_total": fmt(self.export_total),
             "difference": fmt(self.difference),
             "difference_meaning": "export minus invoice",
+            "arithmetic_comparison": ("no_rows" if not self.rows else "equal" if self.difference == 0
+                                      else "within_tolerance" if self.difference.copy_abs() <= self.tolerance
+                                      else "different"),
+            "tolerance": fmt(self.tolerance),
             "rows": self.rows,
             "components": {k: fmt(v) for k, v in sorted(self.components.items())},
             "period_finality": self.finality,
@@ -100,7 +109,10 @@ def load_invoices(path: str | Path) -> list[Expectation]:
     except (OSError, UnicodeDecodeError) as exc:
         raise InputError(f"{p}: cannot read invoice file ({exc})") from exc
     reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
-    fields = {f.strip().lower() for f in (reader.fieldnames or [])}
+    headers = [f.strip().lower() for f in (reader.fieldnames or [])]
+    fields = set(headers)
+    if len(fields) != len(headers):
+        raise InputError(f"{p}: duplicate invoice column")
     if not {"total", "currency"} <= fields or not ({"invoice_id", "period"} & fields):
         raise InputError(f"{p}: needs columns total, currency, and invoice_id and/or period")
     out = []
@@ -110,51 +122,116 @@ def load_invoices(path: str | Path) -> list[Expectation]:
         row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items()}
         out.append(Expectation(parse_amount(row["total"], f"row {i} total"), row["currency"],
                                row.get("invoice_id") or None, row.get("period") or None,
-                               (row.get("provider") or "").lower() or None, row.get("label") or None))
+                               (row.get("provider") or "").lower() or None, row.get("label") or None,
+                               row.get("issuer") or None, row.get("billing_account") or None))
     if not out:
         raise InputError(f"{p}: no invoices listed")
     return out
 
 
+_SCOPE_KEYS = ("invoice_id", "billing_period", "provider", "invoice_issuer", "billing_account_id")
+
+
+def _could_belong(row: dict, anchor: dict) -> bool:
+    """Compare known scope evidence. Different service providers can share an issuer."""
+    keys = ["invoice_id", "billing_period", "invoice_issuer", "billing_account_id"]
+    if (not row["invoice_issuer"] or not anchor["invoice_issuer"]) and "focus" not in (row["provider"],
+                                                                                       anchor["provider"]):
+        keys.append("provider")
+    return all(not row[k] or not anchor[k] or row[k] == anchor[k] for k in keys)
+
+
+def _check_scope(rows: list[dict], selectors: dict, e: Expectation) -> list[dict]:
+    exact = [r for r in rows if all(r[k] == v for k, v in selectors.items())]
+    anchors = [r for r in exact if r["cost_basis"] != "amortized" and r["currency"] == e.currency]
+    for r in rows:
+        if r["cost_basis"] == "amortized":
+            continue
+        if r["currency"] and re.fullmatch("[A-Z]{3}", r["currency"]) and r["currency"] != e.currency:
+            continue
+        missing = [k for k, v in selectors.items() if r[k] != v]
+        if missing:
+            if not anchors or any(_could_belong(r, a) for a in anchors):
+                raise InputError(f"Rows could belong to this invoice but lack {', '.join(missing)}",
+                                 hint="Supply an export with complete invoice scope or isolate the correct delivery.")
+            continue
+        if not r["currency"] or not re.fullmatch("[A-Z]{3}", r["currency"]):
+            raise InputError("Billed rows have missing or invalid currency in this invoice scope.")
+        if r["cost_basis"] != "billed":
+            raise InputError("Rows in this invoice scope have unknown cost basis.",
+                             hint="Identify the actual-cost delivery before reconciling.")
+        if r["invalid"]:
+            raise InputError("Billed rows have missing, invalid, or out-of-range amounts in this invoice scope.",
+                             hint="Use decimal amounts that fit DECIMAL(38,12) exactly, including embedded credits.")
+        if r["coarse"]:
+            raise InputError("A Parquet floating-point billed amount is too large to resolve individual cents.",
+                             hint="Supply an exact decimal or text export from the billing system.")
+    # Known issuer identity can span multiple service providers, e.g. a marketplace.
+    issuers = {r["invoice_issuer"] for r in anchors}
+    if len(issuers) > 1 or (issuers == {None} and len({r["provider"] for r in anchors}) > 1):
+        raise InputError("An invoice comparison must select one issuer.",
+                         hint="Select --issuer or provide files from a single issuer.")
+    if len({r["billing_account_id"] for r in anchors}) > 1:
+        raise InputError("Invoice scope spans multiple or unidentified billing accounts.",
+                         hint="Select --billing-account or supply one account's export.")
+    if not e.invoice_id and len({r["invoice_id"] for r in anchors}) > 1:
+        ids = sorted(str(r["invoice_id"]) for r in anchors if r["invoice_id"])
+        raise InputError("This period contains multiple or partially identified invoices"
+                         + (f" ({', '.join(ids[:6])})" if ids else "") + "; an invoice total covers one of them.",
+                         hint="Select --invoice-id or supply one invoice's export.")
+    return exact
+
+
+@money_context
 def reconcile(ws: Workspace, expectations: list[Expectation], tolerance: Decimal = ZERO) -> list[Result]:
+    for source in ws.recognized:
+        if not source.header_issues:
+            continue
+        mapping = source.mapping
+        expressions = (mapping.cost, mapping.invoice_id, mapping.invoice_issuer, mapping.currency,
+                       mapping.billing_account_id, mapping.billing_period_start, mapping.provider_sql or "")
+        for first, second in Columns.from_names(source.columns).collisions:
+            if any(quote_ident(first) in expr for expr in expressions):
+                raise InputError(f"Ambiguous invoice columns {first!r} and {second!r} in {source.file.display_name}.")
     statuses = period_statuses(ws)
+    compared = set()
+    requested = set()
     results = []
     for e in expectations:
-        cond, params = [], []
-        if e.invoice_id:
-            cond.append("invoice_id = ?")
-            params.append(e.invoice_id)
-        if e.period:
-            cond.append("billing_period = ?")
-            params.append(e.period)
-        if e.provider:
-            cond.append("provider = ?")
-            params.append(e.provider)
-        where = " AND ".join(cond)
-        scope_rows = ws.rows(f"""SELECT provider, currency, cost_basis, count(*) AS n, sum(cost) AS amount
-                                 FROM valid WHERE {where} GROUP BY ALL ORDER BY ALL""", params)
-        providers = sorted({r["provider"] for r in scope_rows})
-        if not e.invoice_id and not e.provider and len(providers) > 1:
-            raise InputError(
-                f"period {e.period} contains {', '.join(providers)}; an invoice comes from one issuer",
-                hint="Add --provider (or a provider column in the invoice file).",
-            )
-        other = [{"currency": r["currency"], "rows": r["n"], "amount": r["amount"]}
-                 for r in scope_rows if r["currency"] != e.currency and r["cost_basis"] == "billed"]
-        amortized = sum(r["n"] for r in scope_rows if r["cost_basis"] != "billed")
-        comp_rows = ws.rows(f"""SELECT charge_category, sum(cost) AS amount, sum(cost - gross_cost) AS embedded,
-                                       count(*) AS n
-                                FROM valid WHERE {where} AND currency = ? AND cost_basis = 'billed'
+        values = (e.invoice_id, e.period, e.provider, e.issuer, e.billing_account)
+        if (values, e.currency) in requested:
+            raise InputError("Duplicate invoice expectation in the same scope and currency.")
+        requested.add((values, e.currency))
+        selectors = {k: v for k, v in zip(_SCOPE_KEYS, values) if v}
+        where = " AND ".join(f"{k} = ?" for k in selectors)
+        possible = " AND ".join("(provider = ? OR provider = 'focus')" if k == "provider"
+                                else f"({k} = ? OR {k} IS NULL)" for k in selectors)
+        params = list(selectors.values())
+        rows = ws.rows(f"""
+            SELECT source_id, invoice_id, billing_period, provider, invoice_issuer, billing_account_id,
+                   currency, cost_basis,
+                   count(*) AS n, sum(cost) AS amount, count(*) - count(cost) AS invalid,
+                   bool_or(billed_precision = 'cent_resolution_lost') AS coarse,
+                   bool_or(billed_precision <> 'decimal') AS approximate
+            FROM items WHERE {possible} GROUP BY ALL ORDER BY ALL""", params)
+        scoped = _check_scope(rows, selectors, e)
+        billed = [r for r in scoped if r["cost_basis"] == "billed" and r["currency"] == e.currency]
+        keys = {tuple(r[k] for k in _SCOPE_KEYS) + (e.currency,) for r in billed}
+        if compared & keys:
+            raise InputError("Invoice expectations overlap and would reuse the same billed rows.")
+        compared.update(keys)
+        other = [{"currency": r["currency"], "rows": r["n"], "amount": None if r["invalid"] else r["amount"]}
+                 for r in scoped if r["currency"] != e.currency and r["cost_basis"] == "billed"]
+        amortized = sum(r["n"] for r in scoped if r["cost_basis"] == "amortized")
+        comp_rows = ws.rows(f"""SELECT charge_category, sum(cost) AS amount, sum(cost - gross_cost) AS embedded
+                                FROM items WHERE {where} AND currency = ? AND cost_basis = 'billed'
                                 GROUP BY 1 ORDER BY 1""", [*params, e.currency])
-        components: dict[str, Decimal] = {}
-        total, n = ZERO, 0
-        for r in comp_rows:
-            components[r["charge_category"]] = r["amount"]
-            total += r["amount"]
-            n += r["n"]
-            if r["embedded"]:
-                components["credits_included_in_usage"] = components.get("credits_included_in_usage", ZERO) + \
-                    r["embedded"]
+        components = {r["charge_category"]: r["amount"] for r in comp_rows}
+        embedded = sum((r["embedded"] or ZERO for r in comp_rows), ZERO)
+        if embedded:
+            components["credits_included_in_usage"] = embedded
+        n = sum(r["n"] for r in billed)
+        total = sum((r["amount"] for r in billed), ZERO)
         diff = total - e.total
         invoices = []
         if not e.invoice_id:
@@ -162,37 +239,55 @@ def reconcile(ws: Workspace, expectations: list[Expectation], tolerance: Decimal
                                           count(*) AS rows
                                    FROM valid WHERE {where} AND currency = ? AND cost_basis = 'billed'
                                    GROUP BY 1 ORDER BY 1""", [*params, e.currency])
-        periods = {p for p in ([e.period] if e.period else [])} or {
-            r["billing_period"] for r in ws.rows(
-                f"SELECT DISTINCT billing_period FROM valid WHERE {where}", params)}
-        fins = {s.finality for s in statuses if s.billing_period in periods and s.currency == e.currency
-                and (not providers or s.provider in providers) and s.cost_basis == "billed"}
+        providers = sorted({r["provider"] for r in billed})
+        scopes = {(r["provider"], r["billing_account_id"], r["billing_period"]) for r in billed}
+        fins = {s.finality for s in statuses if (s.provider, s.billing_account_id, s.billing_period) in scopes
+                and s.currency == e.currency and s.cost_basis == "billed"}
+        if any(period is None for _, _, period in scopes):
+            fins.add("unknown")
         finality = ("preliminary_estimate" if "preliminary_estimate" in fins
                     else "finalized" if fins == {"finalized"} else "unknown")
+        approximate = any(r["approximate"] for r in billed)
+        source_ids = {r["source_id"] for r in billed}
+        missing_credits = any(s.file.source_id in source_ids and s.detected == "gcp"
+                              and not s.mapping.capabilities.get("credits") for s in ws.recognized)
         notes = []
-        if n == 0:
+        if not n:
             status = "no_rows"
             notes.append("No billed rows match this invoice's scope and currency.")
-        elif abs(diff) <= tolerance:
-            status = "not_conclusive" if finality == "preliminary_estimate" else "match"
-        else:
+        elif abs(diff) > tolerance:
             status = "difference"
-        if finality == "preliminary_estimate":
-            notes.append("The period is not finalized; charges can still post, so this comparison is provisional.")
+            notes.extend(_explanations(providers, components, diff, finality))
+        else:
+            identified = all(r["invoice_id"] and r["billing_account_id"] for r in billed)
+            status = "match" if identified and finality == "finalized" and not approximate else "not_conclusive"
+            if diff:
+                notes.append(f"Residual {fmt(diff)} {e.currency} falls within tolerance {fmt(tolerance)}.")
+            else:
+                notes.append("The compared amounts are equal.")
+            if not identified:
+                notes.append("Missing invoice or billing account identity limits this comparison to the selected rows.")
+        if approximate:
+            notes.append("Binary floating-point source amounts limit this comparison to the stored values.")
+        if missing_credits:
+            notes.append("A GCP source lacks a credits column. Its gross cost cannot establish the net payable.")
+        if n and not any(r["invoice_issuer"] for r in billed):
+            notes.append("The selected rows carry no invoice issuer name. Scope relies on the supplied "
+                         "provider, account and invoice identifiers where available.")
+        if n and finality != "finalized":
+            notes.append(f"Period finality is {finality}. Invoice issuance and complete delivery are unconfirmed.")
+        if n:
+            notes.append("Offsetting errors can give equal totals even when individual lines differ.")
+        if other:
+            notes.append(f"Excluded {sum(o['rows'] for o in other):,} rows in other currencies.")
+        if amortized:
+            notes.append(f"Excluded {amortized:,} amortized-basis rows from the billed comparison.")
         real_invoices = [i for i in invoices if i["invoice_id"] != "(no invoice id)"]
         if len(real_invoices) > 1:
             notes.append(f"This scope spans {len(real_invoices)} invoices (" + ", ".join(
                 f"{i['invoice_id']} {fmt(i['amount'])}" for i in real_invoices[:6]) + "); an invoice total covers "
                 "one of them. Reconcile each with --invoice-id.")
-        if status == "difference":
-            notes.extend(_explanations(providers, components, diff, finality))
-        if status == "match":
-            notes.append("Totals agree. Equal totals do not prove line-item completeness: offsetting errors cancel.")
-        if other:
-            notes.append(f"{sum(o['rows'] for o in other):,} rows in other currencies were excluded, not converted.")
-        if amortized:
-            notes.append(f"{amortized:,} amortized-basis rows were excluded; invoices charge billed cost.")
-        res = Result(e, status, total, diff, n, components, other, amortized, finality, providers, notes)
+        res = Result(e, status, total, diff, n, components, other, amortized, finality, providers, tolerance, notes)
         res.invoices = [{"invoice_id": i["invoice_id"], "amount": fmt(i["amount"]), "rows": i["rows"]}
                         for i in invoices]
         results.append(res)

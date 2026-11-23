@@ -10,9 +10,7 @@ every column. They are kept: blind de-duplication silently halves spend.
 
 from __future__ import annotations
 
-import re
-
-from cloudleak.providers.base import Columns, Mapping, month_start
+from cloudleak.providers.base import NULL_MONEY, Columns, Mapping, month_start, norm
 
 SIGNATURE = ("cost_in_billing_currency", "pre_tax_cost", "meter_category", "subscription_id",
              "resource_group", "meter_sub_category", "charge_type", "subscription_guid")
@@ -40,13 +38,35 @@ END"""
 
 
 def basis_from_name(name: str) -> str | None:
-    """'actual' / 'amortized' as a separate word in the path ('ActualCost', 'azure-actual', not 'contractual')."""
-    words = set(re.findall(r"[a-z]+", re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name).lower()))
-    if words & {"amortized", "amortised", "amortizedcost"}:
-        return "amortized"
-    if words & {"actual", "actualcost", "actuals"}:
+    # Accept provider export names (ActualCost / AmortizedCost) and tokens
+    # such as "azure-actual", without inferring a basis from "contractual".
+    tokens = set(norm(name).split("_"))
+    actual = bool(tokens & {"actual", "actualcost"})
+    amortized = bool(tokens & {"amortized", "amortised", "amortizedcost", "amortisedcost"})
+    if actual and amortized:
+        return "conflict"
+    if actual:
         return "billed"
-    return None
+    return "amortized" if amortized else None
+
+
+def list_cost_sql(c: Columns) -> str:
+    billing = c.text("billing_currency", "billing_currency_code", "currency")
+    pricing = c.text("pricing_currency", "pricing_currency_code")
+    rate = c.money("exchange_rate_pricing_to_billing")
+    price = c.money("pay_g_price", "payg_price")
+    quantity = c.money("quantity", "usage_quantity")
+    derived = NULL_MONEY
+    if c.has("pay_g_price", "payg_price") and c.has("quantity", "usage_quantity"):
+        fx = (f"CASE WHEN {billing} IS NULL THEN NULL WHEN upper({billing}) = upper({pricing}) THEN 1 "
+              f"WHEN {rate} > 0 THEN {rate} END")
+        # Narrow the intermediate precision only when exact. A raw three-way
+        # DECIMAL(38,12) product has just two integral digits in DuckDB.
+        derived = (f"(SELECT cl_money(CAST(TRY(subtotal * fx) AS VARCHAR)) "
+                   f"FROM (SELECT cl_money(CAST(TRY(price * qty) AS VARCHAR)) AS subtotal, fx "
+                   f"FROM (SELECT {price} AS price, {quantity} AS qty, {fx} AS fx)))")
+    direct = c.text("payg_cost_in_billing_currency", "pay_g_cost_in_billing_currency")
+    return f"CASE WHEN {direct} IS NOT NULL THEN cl_money({direct}) ELSE {derived} END"
 
 
 def build(cols: Columns, *, basis_hint: str | None = None) -> Mapping:
@@ -76,14 +96,12 @@ def build(cols: Columns, *, basis_hint: str | None = None) -> Mapping:
         cost_raw=cost_raw,
         cost=f"cl_money({cost_raw})",
         effective_cost=f"cl_money({cost_raw})" if basis == "amortized" else "CAST(NULL AS DECIMAL(38,12))",
-        list_cost=(
-            f"cl_money({c.text('pay_g_price')}) * cl_money({c.text('quantity')})"
-            if c.has("pay_g_price") and c.has("quantity") else "CAST(NULL AS DECIMAL(38,12))"
-        ),
+        list_cost=list_cost_sql(c),
         billing_account_id=c.text("billing_account_id", "billing_profile_id", "enrollment_number"),
         sub_account_id=c.text("subscription_id", "subscription_guid"),
         sub_account_name=c.text("subscription_name"),
         invoice_id=c.text("invoice_id", "invoice"),
+        invoice_issuer=c.text("invoice_issuer_name"),
         billing_period_start=f"COALESCE({month_start(period)}, {month_start(date)})",
         charge_start=date,
         charge_end=f"{date} + INTERVAL 1 DAY",
@@ -136,7 +154,10 @@ def infer_basis_sql(table: str, cols: Columns) -> str | None:
     if cost_col is None:
         return None
     ct, cost = cols.text("charge_type"), cols.money(cost_col)
+    unused = f"bool_or(lower({ct}) IN ('unusedreservation','unusedsavingsplan'))"
+    purchase = f"bool_or(lower({ct}) = 'purchase' AND {cost} <> 0)"
     return f"""SELECT CASE
-      WHEN bool_or(lower({ct}) IN ('unusedreservation','unusedsavingsplan')) THEN 'amortized'
-      WHEN bool_or(lower({ct}) = 'purchase' AND {cost} <> 0) THEN 'billed'
+      WHEN {unused} AND {purchase} THEN 'conflict'
+      WHEN {unused} THEN 'amortized'
+      WHEN {purchase} THEN 'billed'
       ELSE NULL END FROM "{table}" """

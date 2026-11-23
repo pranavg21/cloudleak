@@ -98,6 +98,7 @@ class Finding:
     action_risk: str = "unknown"
     approval_history: list[dict] = field(default_factory=list)
     verified_outcome: dict | None = None
+    observed_billed_cost: Decimal | None = None
 
     def __post_init__(self) -> None:
         self.check()
@@ -172,6 +173,7 @@ class Finding:
             "financials": {
                 "cost_basis": self.cost_basis,
                 "observed_cost": fmt(self.observed_cost),
+                "observed_billed_cost": fmt(self.observed_billed_cost),
                 "observed_effective_cost": fmt(self.observed_effective_cost),
                 "verified_savings": None,
             },

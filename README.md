@@ -1,22 +1,21 @@
 # CloudLeak
 
-**Audit AWS, Azure, GCP and FOCUS billing exports on your own machine, before anyone grants an IAM role.**
+**Compare a billing export with an invoice on your own machine, before anyone grants an IAM role.**
 
 CloudLeak is an offline command-line tool for the people who are handed a pile of billing exports and asked
 "can we trust these numbers, what changed, and where is money going?": FinOps consultants doing a
 pre-engagement assessment, MSPs scoping a prospect, and platform engineers who inherited the cloud bill.
 
-- **`doctor`** catches the defects that silently corrupt cost reports: unfinalized periods, missing
-  manifest partitions, files supplied twice, overlapping deliveries, Azure actual and amortized exports
-  added together, unparseable amounts, missing resource IDs, unactivated tags, tag keys spelled three
-  ways, and FOCUS columns a provider ships but never fills.
-- **`reconcile`** compares an export with the invoice it should add up to, exactly, to the last decimal.
+- **`reconcile`** compares billed charges with a supplied invoice and reports the signed difference in the
+  invoice currency, including fractions of a cent.
+- **`doctor`** flags missing manifest partitions, duplicate files, mixed Azure cost bases, unparseable
+  amounts, inconsistent tag keys and FOCUS columns that are empty throughout an export.
 - **`variance`** explains a month-over-month change as a bridge that adds up exactly: new and discontinued
   spend, usage volume, unit rate, credits, tax and purchases.
 - **`audit`** writes a single-file HTML brief (plus JSON, Markdown, CSV, SARIF) with evidence-graded
   findings and read-only verification commands.
 - **`redact`** pseudonymizes exports so they can be shared with an outside consultant or an AI tool,
-  and refuses to write anything if an identifier would survive.
+  and checks the finished bundle against its publication rules.
 
 No cloud credentials. No network access. No telemetry. One runtime dependency
 ([DuckDB](https://duckdb.org)). Apache-2.0.
@@ -25,7 +24,7 @@ No cloud credentials. No network access. No telemetry. One runtime dependency
 
 | Question | What CloudLeak says |
 | --- | --- |
-| What was billed, by period, currency, account, service and SKU, and is the period final? | **Proven by the export** (evidence Level 1) |
+| What billed amounts and invoice identifiers does this delivery contain? | **Billing observation** (Level 1). Totals cover the supplied records. The tool reports period finality separately when the export provides evidence. |
 | Which charges have a billing line that names a pattern: idle public IPv4, NAT processing, unused commitment, extended support, gp2 volumes, snapshot storage, log ingestion, cross-zone transfer? | **Supported hypothesis** (Level 2), with what is unknown, when it could be legitimate, and read-only commands to verify it |
 | Is a resource unused, orphaned or safe to delete? How much would we save? | **Not provable from billing data.** CloudLeak never claims it and never prints a savings figure |
 
@@ -36,62 +35,50 @@ by the published JSON Schema.
 
 ## Install
 
-Python 3.10 or newer. The command is `cloudleak`.
+Install from this source checkout with Python 3.10 or newer and uv. Run the following from the directory
+containing this README, with uv's tool executable directory on your PATH. [uv setup](https://docs.astral.sh/uv/guides/tools/)
 
 ```bash
-pipx install git+https://github.com/pranavg21/cloudleak
+uv tool install .
+cloudleak --version
 ```
 
-or with uv:
+This quickstart installs the checkout pending the first PyPI release of `cloudleak-cli`.
+The PyPI project named `cloudleak` belongs to a different project.
+
+## Reconcile a synthetic invoice
+
+From any empty working directory, generate two months of invented billing data, two synthetic September
+invoices, and an HTML audit you can open at `cloudleak-demo/report.html`.
 
 ```bash
-uv tool install git+https://github.com/pranavg21/cloudleak
+cloudleak demo -q
+cloudleak reconcile cloudleak-demo/m1 --invoices cloudleak-demo/invoices.csv
 ```
 
-Once 0.1.0 is released, the PyPI distribution will be **`cloudleak-cli`** (`pipx install cloudleak-cli`).
-Releases are published only by this repository's release workflow, with provenance you can verify
-(see [SECURITY.md](SECURITY.md#supply-chain)). The PyPI project named `cloudleak` (without `-cli`) is an
-unrelated package.
+The second command exits **1**. The invoices round the September totals to cents. CloudLeak subtracts the
+invoice amount from the export total and keeps the signed residual.
 
-To run with no network at all, see [Air-gapped and container use](#air-gapped-and-container-use).
+| Invoice | Export total (USD) | Invoice (USD) | Difference (USD) |
+| --- | ---: | ---: | ---: |
+| AWS `EUINAA26090001` | 27206.8066200011 | 27206.81 | −0.0033799989 |
+| GCP September period | 586.439680001 | 586.44 | −0.000319999 |
 
-## Sixty seconds with the bundled samples
-
-The repository ships two synthetic months (`samples/m1`, `samples/m2`) of AWS CUR 2.0, Azure actual and
-amortized, GCP detailed and FOCUS 1.2 exports, with the traps real exports have.
+To accept a difference of up to one cent for the finalized AWS invoice, run the same comparison for its ID.
 
 ```bash
-cloudleak doctor samples/m2
+cloudleak reconcile cloudleak-demo/m1 --invoice-id EUINAA26090001 --currency USD --total 27206.81 --tolerance 0.01
 ```
 
-```text
-WARN CL-ACC-002 [aws 210987654321 2026-10 USD (billed)]: PRELIMINARY ESTIMATE: bill_invoice_id is blank:
-     AWS has not finalized this period. Totals can still change; invoice reconciliation is not conclusive.
-WARN CL-ACC-004 [azure 2f6c3d5e-… 2026-10]: Both amortized and billed costs are present. They are reported
-     side by side; adding them would double count.
-WARN CL-DQ-003 [aws]: Tag key 'env' is spelled 2 ways: user_Env, user_env.
-WARN CL-FOC-003 [...focus-1.2-2026-10.csv]: Present but never populated: invoice_id (invoice reconciliation).
-INFO CL-DQ-004 [...azure-amortized-2026-10.csv]: 31 groups of fully identical rows (62 rows). Kept as separate
-     charges: Azure documents identical rows in amortized exports, and de-duplicating them understates spend.
-```
+This exits **0**. The reported difference is still `-0.0033799989` USD. GCP supplies an invoice month in
+this demo, so its total alone cannot establish which invoice was issued or whether all charges arrived.
+
+These commands inspect October's data quality and write the change between September and October to `brief.html`.
 
 ```bash
-cloudleak variance samples/m1 samples/m2 -o brief.html
+cloudleak doctor cloudleak-demo/m2
+cloudleak variance cloudleak-demo/m1 cloudleak-demo/m2 -o brief.html
 ```
-
-```text
-Billed spend rose from 30,677.70 USD in 2026-09 to 32,983.99 USD in 2026-10 (+2,306.30 USD, +7.5%).
-The change breaks down into usage volume +2,228.55 USD, tax +108.16 USD, credits, refunds & discounts
--42.92 USD, new spend +12.50 USD. Largest increases: AmazonEC2 (+1,164.98 USD), AmazonCloudWatch
-(+340.50 USD), Log Analytics (+327.06 USD).
-```
-
-```bash
-cloudleak redact samples/m2 -o shareable.zip
-```
-
-`cloudleak demo` generates the same corpus into a new directory and writes a full `report.html` and
-`report.json` for it.
 
 ## Commands
 
@@ -100,9 +87,9 @@ cloudleak redact samples/m2 -o shareable.zip
 | `cloudleak doctor PATH…` | Check completeness, finality and data quality before trusting a number. `--format junit` / `-o checks.xml` for CI | 0 ok · 1 a check reached `--fail-on` (default `fail`) |
 | `cloudleak audit PATH… -o brief.html` | Full brief: totals, bridge, Level-2 findings, data quality, provenance | 0 · 1 per `--fail-on` (`fail`, `warn`, `findings`, `never`) |
 | `cloudleak variance BASE CURRENT` | Explain what changed between two periods (or one path holding two) | 0 |
-| `cloudleak reconcile PATH --invoice-id ID --total 812.36 --currency USD` | Compare with an invoice; also `--period YYYY-MM --provider aws`, or `--invoices invoices.csv` | 0 match · 1 difference |
-| `cloudleak diff BEFORE AFTER` | See what a later delivery of the same period restated (late fees, credits, finalization) | 0 · 1 with `--fail-on-change` |
-| `cloudleak redact PATH… -o out.zip` | Pseudonymize for sharing; fail-closed | 0 · 2 if anything could leak |
+| `cloudleak reconcile PATH --invoice-id ID --total 812.36 --currency USD` | Compare billed amounts. Use `--invoices invoices.csv` for several invoices. | 0 within tolerance (inspect finality and status) · 1 difference or no matching rows · 2 invalid or ambiguous input |
+| `cloudleak diff BEFORE AFTER` | Compare totals by charge category, service and account, row counts, and invoice coverage across deliveries | 0 · 1 with `--fail-on-change` |
+| `cloudleak redact PATH… -o out.zip` | Pseudonymize for sharing; fail-closed | 0 · 2 if the publication checks fail |
 | `cloudleak resolve ALIAS… --source PATH…` | Translate aliases in a consultant's notes back to real IDs, locally | 0 |
 | `cloudleak checks` · `rules` · `schema finding` | List doctor checks, signature rules, or print the JSON Schema | 0 |
 
@@ -117,21 +104,23 @@ doctor only). Repeat `-o` for several.
 
 | Provider | Exports | Notes |
 | --- | --- | --- |
-| AWS | CUR legacy (`lineItem/…`) and CUR 2.0 / Data Exports (`line_item_…`); CSV, `.csv.gz`, Parquet; legacy and Data Exports manifests | Finality from `bill_invoice_id`; amortized cost per the CUR formula; split cost allocation rows never double counted |
-| Azure | Cost Management exports, EA and MCA, actual and amortized; `manifest.json` row counts | Basis from folder or file name (`actual` / `amortized`) or from charge types; identical rows kept; MM/DD/YYYY dates |
-| GCP | Standard and detailed usage cost exports (BigQuery to CSV or Parquet) | Net cost = `cost + SUM(credits.amount)`; period = `invoice.month`; late usage reported |
-| FOCUS | 1.0 to 1.4 (version inferred from columns), from any provider | CloudLeak does not certify conformance (use the [FinOps Foundation](https://focus.finops.org) validator for that); it reports which columns are missing or present but empty |
+| AWS | CUR legacy (`lineItem/…`) and CUR 2.0 / Data Exports (`line_item_…`). CSV, gzip CSV and Parquet | Billed cost uses the unblended cost field. Split allocation amounts and effective costs serve different purposes. Invoice IDs help assess finality. |
+| Azure | Cost Management actual and amortized exports, including EA and MCA field layouts | Billed and amortized costs stay separate. Azure pre-tax amounts may require adjustments to compare with the payable invoice. |
+| GCP | Standard and detailed usage cost exports | Net cost includes embedded credits. The invoice month can differ from the usage month. |
+| FOCUS | Cost and Usage columns, with synthetic header cases from FOCUS 1.0 through 1.4 | Column names provide evidence of a minimum version. Use the FinOps Foundation validator for specification conformance. [FOCUS validator](https://github.com/finopsfoundation/focus-spec-validator) |
+
+The examples exercise specific fields and file shapes. Production coverage across provider agreements,
+delivery options and versions remains unverified.
 
 Something not recognized? Open a [schema quirk issue](https://github.com/pranavg21/cloudleak/issues/new?template=schema-quirk.yml)
-with the **header row only**. Never paste billing data into an issue.
+with a synthetic example. Replace private header names and values before sharing.
 
 ## How the numbers are kept honest
 
-- **Exact decimals.** Every amount is parsed as text and summed as `DECIMAL(38,12)`; nothing passes through
-  floating point. JSON output carries money as strings. Totals of the bundled samples match the
-  generator's ground truth to every decimal place, and the test suite asserts it.
-- **Nothing is silently dropped or merged.** Unparseable amounts are counted and reported, never zeroed.
-  Currencies are never summed together. Actual and amortized costs are never added. Identical rows are kept.
+- **Decimal amounts.** The canonical amount type is `DECIMAL(38,12)`. JSON carries money as strings,
+  including sub-cent residuals. Data already rounded by an upstream exporter has only the precision supplied.
+- **Invoice scope.** Reconciliation uses billed cost in the invoice currency. The report identifies
+  excluded currencies and cost bases. Identical charge rows remain separate.
 - **Periods are invoice periods, in UTC.** GCP late usage lands in the invoice month it was billed in. A
   month-over-month percentage across periods of unequal coverage is reported per day, never as a raw spike.
 - **The bridge closes.** Base total plus every driver equals the current total, exactly; the code
@@ -158,20 +147,22 @@ command that changes infrastructure.
 
 ## Redaction
 
-`cloudleak redact` replaces account IDs, subscription and project IDs, resource IDs and names, ARNs,
-invoice IDs, tag values, e-mail addresses and IP addresses with keyed aliases (HMAC-SHA256). The same value
-gets the same alias in every file, so joins still work. Costs, dates, services, SKUs and regions are kept.
+`cloudleak redact` writes pseudonymized CSVs and a redaction report to a directory or ZIP. Account and
+resource IDs, descriptions, service and SKU labels, regions, customer-defined tag headers, and tag keys
+and values receive keyed aliases. Repeated values have the same HMAC-derived suffix under the same key.
 
-It fails closed at three gates:
+The explicit column registry keeps numeric amounts and quantities, dates, recognized currency codes and
+billing categories. Structured GCP credits retain each amount. Unknown columns stop publication unless
+you choose `--drop-unclassified`. Diagnostics and the dropped-column inventory use column positions.
 
-1. **Column registry.** A column CloudLeak has not classified stops the run (or is dropped with
-   `--drop-unclassified`).
-2. **Value scrubbing.** Identifier patterns, including 12-digit account IDs with leading zeros, and every
-   known identifier are replaced inside free-text fields.
-3. **Residual scan.** The finished bundle is re-read; one surviving identifier deletes it and exits 2.
+Before publication, CloudLeak reads the completed bundle and checks its member names, headers, data
+cells and report. The report counts the CSV data cells checked. The default key lives in
+`.cloudleak/redaction.key`. Use `--key-file` to select a private key elsewhere. On POSIX, keys and bundle
+files use mode 0600 and bundle directories use 0700. Choose an output separate from the inputs and key.
+Use a fresh directory for each bundle or `--force` to replace a ZIP.
 
-The key is created at `.cloudleak/redaction.key` (mode 0600, git-ignored) and never leaves your machine.
-Redaction reduces exposure; it does not make data anonymous.
+Review whether the visible costs, dates, repeated aliases and file fingerprints can identify a client.
+Pseudonymized labels can limit analyses that depend on service names, regions, SKUs or tag semantics.
 
 ## Use in CI
 
@@ -196,10 +187,10 @@ Python 3.13, DuckDB 2.0.1, default `--memory-limit 2GB`:
 | 3,000,000 | 1.24 GB | 78 MB | 29 s | 31 s | 2.1 GB |
 | 10,000,000 | ~4.1 GB | 259 MB | 79 s | 100 s | 2.4 GB |
 
-Memory is bounded by `--memory-limit`, not by file size; DuckDB spills to `--temp-dir` beyond it (about
-1.4 GB of spill at 10M rows). `redact` is slower because every cell passes through the scrubber and the
-residual scan: about 2 minutes per million rows of this shape. Inputs above ~4 GB uncompressed have not been
-measured. Run the script on your hardware before you rely on these numbers.
+`--memory-limit` sets DuckDB's memory budget. The process also uses memory outside that budget, and
+DuckDB can spill to `--temp-dir`. In a separate synthetic reconciliation of a 10,063,750,122-byte CSV
+with 1,250,000 rows, `--memory-limit 1GB` and two threads, peak process RSS reached 1,171,344 KiB
+(1.20 GB). Allow for this overhead when sizing a container.
 
 ## Air-gapped and container use
 
@@ -241,7 +232,7 @@ prototype was retired in favor of this CLI; it is preserved in git history at co
 Validation so far uses synthetic fixtures with exact ground truth plus adversarial cases (attached disks,
 in-use IPs, GPUs, refunds, identical Azure rows, preliminary months, hostile tags, malformed files). It
 has not yet been evaluated on independently labeled production exports. If you run it on real exports,
-[tell us what broke](https://github.com/pranavg21/cloudleak/issues) (headers only).
+[tell us what broke](https://github.com/pranavg21/cloudleak/issues) (synthetic, sanitized headers only).
 
 ## Contributing
 

@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from cloudleak.engine import Workspace
 
+FINALITY_RANK = {"preliminary_estimate": 0, "unknown": 1, "finalized": 2}
 OWNER_KEYS = ("owner", "team", "cost_center", "costcenter", "cost-center", "application", "app", "service",
               "project", "squad", "department")
 
@@ -48,16 +49,19 @@ def days_in(period: str) -> int:
     return calendar.monthrange(int(period[:4]), int(period[5:7]))[1]
 
 
-def period_statuses(ws: Workspace) -> list[PeriodStatus]:
-    rows = ws.rows("""
-        SELECT provider, billing_account_id, billing_period, currency, cost_basis, min(dataset) AS dataset,
+def period_statuses(ws: Workspace, *, where: str = "TRUE") -> list[PeriodStatus]:
+    rows = ws.rows(f"""
+        SELECT provider, billing_account_id, billing_period, currency, cost_basis,
+               bool_and(starts_with(dataset, 'aws_cur')) AS aws_cur,
+               bool_and(starts_with(dataset, 'azure_')) AS azure,
+               bool_or(starts_with(dataset, 'focus')) AS focus,
                count(*) AS n,
                count(invoice_id) AS with_invoice,
                count(DISTINCT charge_date) FILTER (
                    WHERE strftime(charge_date, '%Y-%m') = billing_period) AS days,
                min(charge_date) AS first_day, max(charge_date) AS last_day,
                sum(cost) AS total
-        FROM valid WHERE billing_period IS NOT NULL
+        FROM valid WHERE billing_period IS NOT NULL AND ({where})
         GROUP BY ALL ORDER BY provider, billing_period, billing_account_id, currency, cost_basis
     """)
     out = []
@@ -65,16 +69,17 @@ def period_statuses(ws: Workspace) -> list[PeriodStatus]:
         period = r["billing_period"]
         dip = days_in(period)
         days = int(r["days"] or 0)
-        ds = r["dataset"] or ""
         n, inv = r["n"], r["with_invoice"]
-        if ds.startswith("aws_cur"):
+        if r["aws_cur"]:
             if inv == n:
                 fin, why = "finalized", "every line item carries bill_invoice_id"
             elif inv == 0:
                 fin, why = "preliminary_estimate", "bill_invoice_id is blank: AWS has not finalized this period"
             else:
                 fin, why = "unknown", f"{n - inv} of {n} line items lack bill_invoice_id"
-        elif ds.startswith("focus") or ds.startswith("azure"):
+        elif r["focus"]:
+            fin, why = "unknown", "FOCUS invoice identifiers can be assigned before an invoice is issued"
+        elif r["azure"]:
             if n and inv == n:
                 fin, why = "finalized", "every row carries InvoiceId"
             elif inv:
@@ -84,8 +89,8 @@ def period_statuses(ws: Workspace) -> list[PeriodStatus]:
         else:
             fin, why = "unknown", "this export type does not state invoice finality"
         if days == 0:
-            fin, why = "unknown", "only late-arriving usage from earlier months is present"
-        elif days < dip and fin != "finalized":
+            fin, why = "unknown", "no charge dates fall within the assigned billing period"
+        elif days < dip and fin != "finalized" and not r["focus"]:
             fin = "preliminary_estimate"
             why = f"covers {days} of {dip} days" + (f"; {why}" if why else "")
         out.append(PeriodStatus(
@@ -98,18 +103,28 @@ def period_statuses(ws: Workspace) -> list[PeriodStatus]:
 
 def finality_lookup(statuses: list[PeriodStatus]) -> dict[tuple, str]:
     """(provider, billing_account_id, period) -> worst finality across currencies/bases."""
-    rank = {"preliminary_estimate": 0, "unknown": 1, "finalized": 2}
     out: dict[tuple, str] = {}
     for s in statuses:
         key = (s.provider, s.billing_account_id, s.billing_period)
-        if key not in out or rank[s.finality] < rank[out[key]]:
+        if key not in out or FINALITY_RANK[s.finality] < FINALITY_RANK[out[key]]:
             out[key] = s.finality
     return out
 
 
-def totals(ws: Workspace) -> list[dict]:
+def totals_finality(periods: list[dict]) -> dict[tuple, str]:
+    """A provider total is finalized only when all contributing account scopes are finalized."""
+    out: dict[tuple, str] = {}
+    for period in periods:
+        key = tuple(period[k] for k in ("provider", "billing_period", "currency", "cost_basis"))
+        value = period["finality"]
+        if key not in out or FINALITY_RANK[value] < FINALITY_RANK[out[key]]:
+            out[key] = value
+    return out
+
+
+def totals(ws: Workspace, *, where: str = "TRUE") -> list[dict]:
     """Spend by provider, basis, period and currency, split by charge category."""
-    return ws.rows("""
+    return ws.rows(f"""
         SELECT provider, cost_basis, billing_period, currency,
                sum(cost) AS total,
                sum(cost) FILTER (WHERE charge_category = 'usage') AS usage,
@@ -123,7 +138,7 @@ def totals(ws: Workspace) -> list[dict]:
                sum(cost) FILTER (WHERE charge_category = 'unknown') AS other,
                sum(cost - gross_cost) AS embedded_credits,
                count(*) AS rows
-        FROM valid GROUP BY ALL ORDER BY provider, cost_basis, billing_period, currency
+        FROM valid WHERE {where} GROUP BY ALL ORDER BY provider, cost_basis, billing_period, currency
     """)
 
 

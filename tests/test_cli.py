@@ -19,12 +19,61 @@ def fixed_time(monkeypatch):
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1795000000")
 
 
-def test_demo_end_to_end(tmp_path, capsys):
-    assert main(["demo", str(tmp_path / "d"), "-q"]) == 0
-    assert (tmp_path / "d" / "report.html").stat().st_size > 10000
-    report = json.loads((tmp_path / "d" / "report.json").read_text())
+def test_demo_end_to_end(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert main(["demo", "-q"]) == 0
+    demo = tmp_path / "cloudleak-demo"
+    assert (demo / "report.html").stat().st_size > 10000
+    report = json.loads((demo / "report.json").read_text())
     assert report["synthetic_data"] is True
     assert report["trust_boundary"]["network_access"] == "none"
+
+    cmd = ["reconcile", "cloudleak-demo/m1", "--format", "json"]
+    capsys.readouterr()
+    assert main([*cmd, "--invoices", "cloudleak-demo/invoices.csv"]) == 1
+    results = json.loads(capsys.readouterr().out)["reconciliation"]
+    assert {r["invoice"]["provider"]: (r["invoice"]["total"], r["export_total"], r["difference"])
+            for r in results} == {
+        "aws": ("27206.81", "27206.8066200011", "-0.0033799989"),
+        "gcp": ("586.44", "586.439680001", "-0.000319999"),
+    }
+    assert all(r["arithmetic_comparison"] == "different" for r in results)
+    assert main([*cmd, "--invoice-id", "EUINAA26090001", "--currency", "USD",
+                 "--total", "27206.81", "--tolerance", "0.01"]) == 0
+    accepted, = json.loads(capsys.readouterr().out)["reconciliation"]
+    assert accepted["difference"] == "-0.0033799989"
+    assert accepted["arithmetic_comparison"] == "within_tolerance"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_demo_audit_failure_leaves_destination_untouched(tmp_path, existing):
+    target = tmp_path / "demo"
+    before = {"report.html": b"old report", "report.json": b"old JSON",
+              "invoices.csv": b"old invoices", "m1/customer-note.txt": b"unrelated"}
+    if existing:
+        for name, contents in before.items():
+            path = target / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+    args = ["demo", str(target), "--memory-limit", "1MB", "-q"]
+    assert main([*args, "--force"] if existing else args) == 2
+    if existing:
+        assert {p.relative_to(target).as_posix(): p.read_bytes() for p in target.rglob("*") if p.is_file()} == before
+    else:
+        assert not target.exists()
+    assert not list(tmp_path.glob(".cloudleak-demo-*"))
+
+
+def test_demo_force_preserves_unrelated_files(tmp_path):
+    target = tmp_path / "demo"
+    note = target / "m1" / "aws" / "keep.txt"
+    note.parent.mkdir(parents=True)
+    note.write_text("customer note")
+    (target / "report.html").write_text("previous report")
+    assert main(["demo", str(target), "--force", "-q"]) == 0
+    assert note.read_text() == "customer note"
+    assert (target / "report.html").stat().st_size > 10000
+    assert (target / "invoices.csv").is_file()
 
 
 def test_audit_is_byte_deterministic(demo, tmp_path):

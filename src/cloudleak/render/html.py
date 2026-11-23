@@ -10,7 +10,8 @@ from __future__ import annotations
 from decimal import Decimal
 from html import escape
 
-from cloudleak.money import display
+from cloudleak.analysis import totals_finality
+from cloudleak.money import display, money_context
 from cloudleak.render.formats import owner_label
 from cloudleak.report import CAN_CANNOT, ISSUES_URL
 
@@ -166,6 +167,7 @@ def waterfall(bridge: dict, width: int = 900) -> str:
     return f'<div class="chart">{"".join(out)}{note}</div>'
 
 
+@money_context
 def render(report: dict) -> str:
     r = report
     title = "CloudLeak audit brief"
@@ -243,21 +245,20 @@ def render(report: dict) -> str:
             '<div class="grid2"><div><h3>Bridge</h3>' + table(["Driver", "Amount"], rows, {1}) + "</div>"
             "<div><h3>By service category</h3>" + table(["Category", br["base_period"], br["current_period"], "Δ"],
                                                          cats, {1, 2, 3}) + "</div></div>"
-            "<h3>Largest line changes</h3>" + table(
+            "<h3>Largest SKU group changes</h3>" + table(
                 ["Service", "SKU", "Account", "Before", "After", "Δ", "Driver", "Owner"], changes, {3, 4, 5}))
 
     # Spend
     spend = ['<h2 id="spend">Spend</h2>']
     trows = []
+    finality = totals_finality(periods)
     for t in totals:
         cur = t["currency"]
         comp = []
         for k in ("purchase", "fee", "tax", "credit", "refund", "discount", "adjustment", "embedded_credits"):
             if t.get(k) not in (None, "0.00") and D(t.get(k)) != 0:
                 comp.append(f"{k.replace('_', ' ')} {display(D(t[k]))}")
-        fin = next((p["finality"] for p in periods if p["provider"] == t["provider"]
-                    and p["billing_period"] == t["billing_period"] and p["currency"] == cur
-                    and p["cost_basis"] == t["cost_basis"]), "unknown")
+        fin = finality.get((t["provider"], t["billing_period"], cur, t["cost_basis"]), "unknown")
         trows.append([e(t["provider"]), e(t["billing_period"]), e(t["cost_basis"]),
                       f'<span class="fin-{e(fin)}">{e(fin.replace("_", " "))}</span>', money(t["total"], cur),
                       money(t.get("usage"), cur), e("; ".join(comp))])
@@ -283,8 +284,8 @@ def render(report: dict) -> str:
     sig = [f for f in fs if f["classification"] == "billing_signature_candidate"]
     other = [f for f in fs if f["classification"] in ("reconciliation_delta",)]
     fsec = ['<h2 id="findings">Billing-signature findings (Level 2)</h2>',
-            '<p class="muted small">Each item is a hypothesis supported by the billing line itself. Observed cost is '
-            "what was billed in the period; it is not a saving. Verify with the read-only steps before any change."
+            '<p class="muted small">Each amount uses the cost basis shown on its finding. '
+            "Verify the billing signal with the read-only steps before making a change."
             "</p>"]
     if not sig:
         fsec.append("<p>No billing signatures matched.</p>")
@@ -292,11 +293,12 @@ def render(report: dict) -> str:
     for f in sig:
         by_rule.setdefault(f["rule_id"], []).append(f)
     for rid, items in by_rule.items():
-        total_by_cur: dict[str, Decimal] = {}
+        subtotals: dict[tuple, Decimal] = {}
         for f in items:
-            total_by_cur[f["currency"]] = total_by_cur.get(f["currency"], Decimal(0)) + D(
-                f["financials"]["observed_cost"])
-        tot = " · ".join(display(v, c) for c, v in sorted(total_by_cur.items(), key=lambda kv: str(kv[0])))
+            key = (f["currency"], f["financials"]["cost_basis"])
+            subtotals[key] = subtotals.get(key, Decimal(0)) + D(f["financials"]["observed_cost"])
+        tot = " · ".join(f"{display(v, c)} {basis}" for (c, basis), v in
+                         sorted(subtotals.items(), key=lambda kv: tuple(map(str, kv[0]))))
         fsec.append(f"<h3>{e(items[0]['title'])} <span class=\"muted small\">{e(rid)} · {len(items)} item(s) · "
                     f"{e(tot)} observed</span></h3>")
         fsec.append(f'<p class="small muted">{e(items[0]["details"].get("rationale", ""))}</p>')
@@ -342,7 +344,7 @@ def render(report: dict) -> str:
     footer = (f'<footer>Generated locally by CloudLeak. This file contains identifiers and costs from the source '
               f'export; share it within the same access boundary as the export, or run '
               f'<code>cloudleak redact</code> first. · <a href="{e(ISSUES_URL)}">Report a provider schema quirk '
-              "(headers only, never paste billing data)</a></footer>")
+              "(use synthetic headers)</a></footer>")
     csp = ("default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'")
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -366,13 +368,16 @@ def _finding_html(f: dict) -> str:
                      + "</li>")
     ev = f["exact_evidence"]
     sample = ", ".join(f"source {x['source_id']} row {x['row']}" for x in ev.get("sample_rows", [])[:5])
+    billed = f["financials"].get("observed_billed_cost")
+    billed_detail = f"<p>Billed cost of matched rows: {money(billed, cur)}</p>" if billed is not None else ""
     return (
-        f"<details><summary><span class=\"amt\">{money(f['financials']['observed_cost'], cur)}</span>"
+        f"<details><summary><span class=\"amt\">{money(f['financials']['observed_cost'], cur)} "
+        f"{e(f['financials']['cost_basis'])}</span>"
         f"<strong>{e(f['provider'])}</strong> · {e(where)} · {e(f['billing_period'])} "
         f'<span class="chip fin-{e(fin)}">{e(fin.replace("_", " "))}</span> '
         f'<span class="chip">{e(f["evidence_level"])}</span> '
         f'<span class="small muted">owner: {e(owner_txt)}</span></summary><div>'
-        f"<p>{e(f['summary'])}</p>"
+        f"<p>{e(f['summary'])}</p>{billed_detail}"
         f'<p class="small"><strong>Evidence:</strong> {ev["matched_rows"]:,} line item(s) matching '
         f'{e(", ".join(ev.get("matched_values", [])[:5]))}; {e(sample)}. Finding <code>{e(f["finding_id"])}</code>.</p>'
         f'<div class="grid2"><div><strong class="small">Unknown from billing data</strong><ul>'

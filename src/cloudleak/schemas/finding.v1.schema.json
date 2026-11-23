@@ -40,7 +40,8 @@
       "additionalProperties": false,
       "required": ["cost_basis", "observed_cost", "observed_effective_cost", "verified_savings"],
       "properties": {
-        "cost_basis": {"type": ["string", "null"], "enum": ["billed", "amortized", "unknown", null]},
+        "cost_basis": {"type": ["string", "null"], "enum": ["billed", "amortized", "effective", "unknown", null]},
+        "observed_billed_cost": {"$ref": "#/$defs/money"},
         "observed_cost": {"$ref": "#/$defs/money"},
         "observed_effective_cost": {"$ref": "#/$defs/money"},
         "verified_savings": {"$ref": "#/$defs/money"}

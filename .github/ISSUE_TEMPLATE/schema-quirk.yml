@@ -1,12 +1,12 @@
 name: Provider schema quirk
-description: An export CloudLeak does not recognize or reads incorrectly. Headers only, never billing data.
+description: An export CloudLeak does not recognize or reads incorrectly. Use synthetic headers and values.
 labels: ["schema-quirk"]
 body:
   - type: markdown
     attributes:
       value: |
-        **Never paste billing rows, account IDs, invoice numbers or resource names.** Header names and the
-        CloudLeak check ID are enough. If a value's *shape* matters, describe it ("12 digits", "MM/DD/YYYY").
+        **Never paste billing rows, account IDs, invoice numbers or resource names.** Replace private header names, including dynamic tag keys, with fictional names.
+        Include the CloudLeak check ID. If a value's *shape* matters, describe it ("12 digits", "MM/DD/YYYY").
   - type: dropdown
     id: provider
     attributes:
@@ -17,8 +17,8 @@ body:
   - type: textarea
     id: headers
     attributes:
-      label: Header row
-      description: The first line of the file only.
+      label: Synthetic header example
+      description: Include the relevant provider field names and replace custom names with fictional labels.
       render: text
     validations:
       required: true

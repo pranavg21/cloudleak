@@ -19,8 +19,8 @@ CloudLeak reach the network or write outside its output paths are treated as sec
 | Read-only guidance | Findings carry only read-only commands; a contract check rejects mutating verbs, and every value from an export is shell-quoted. |
 | Hostile input | Malformed, ragged, truncated or non-UTF files fail with exit 2 instead of being partially read. `.gz` inputs are stream-checked for truncation and for decompression ratios above 1000:1. Archives are not opened. |
 | Hostile content | HTML output is fully escaped, contains no JavaScript and carries a `default-src 'none'` Content Security Policy. CSV output neutralizes formula injection (`=`, `+`, `-`, `@`, tab, CR prefixes on non-numeric cells). |
-| Output files | Written atomically with owner-only permissions; an input file is never overwritten. |
-| Redaction | HMAC-SHA256 aliases under a local key (mode 0600); three fail-closed gates; the bundle is discarded if any identifier survives. |
+| Output files | Redaction stages the complete bundle in a private directory. POSIX bundle directories use mode 0700, files and keys use 0600. Publication checks for overlap with the inputs and key. |
+| Redaction | An explicit registry limits which structured values can pass through. Other recognized text and tags receive keyed aliases. The tool reopens the final directory or ZIP to check names, headers, CSV values and report metadata before publication. |
 
 ## What offline processing does not guarantee
 
@@ -41,8 +41,12 @@ For regulated data:
    from a redacted bundle.
 5. Sanitize media at end of life with cryptographic erase or destruction, per your organization's policy.
 
-Redaction reduces exposure; it does not anonymize. Someone who already knows an organization's spend
-pattern may still recognize it in aggregate numbers.
+The bundle preserves numeric costs, credit amounts, dates, recognized currency codes and billing categories.
+Repeated aliases, cost patterns, source fingerprints and the key fingerprint can link a bundle to other
+data. Opaque service, region, SKU and owner labels can limit analyses that need their original meanings.
+Inspect the bundle locally before sharing. Treat diagnostic output from other commands as sensitive.
+Only the tool-managed default key directory gets an automatic Git ignore rule. Set appropriate ACLs for
+the host platform when POSIX permission bits do not apply.
 
 ## Supply chain
 

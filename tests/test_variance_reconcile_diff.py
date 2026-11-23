@@ -82,7 +82,8 @@ def invoice_file(tmp_path):
 def test_reconcile_exact_match(invoice_file):
     with Workspace([invoice_file]) as ws:
         r = reconcile(ws, [Expectation(Decimal("22.00"), "USD", "DEMO-1042")])[0]
-    assert r.status == "match" and r.difference == 0 and r.rows == 3
+    assert r.status == "not_conclusive" and r.difference == 0 and r.rows == 3
+    assert r.to_dict()["arithmetic_comparison"] == "equal" and r.finality == "unknown"
     assert r.components == {"usage": Decimal("26.75"), "credit": Decimal("-4.75")}
     assert r.excluded_other_currency[0]["currency"] == "EUR"
 
@@ -92,7 +93,7 @@ def test_reconcile_subcent_difference_is_reported(invoice_file):
         r = reconcile(ws, [Expectation(Decimal("22.001"), "USD", "DEMO-1042")])[0]
         assert r.status == "difference" and r.difference == Decimal("-0.001")
         r2 = reconcile(ws, [Expectation(Decimal("22.001"), "USD", "DEMO-1042")], Decimal("0.01"))[0]
-        assert r2.status == "match"
+        assert r2.status == "not_conclusive" and r2.to_dict()["arithmetic_comparison"] == "within_tolerance"
 
 
 def test_reconcile_preliminary_not_conclusive(tmp_path):
