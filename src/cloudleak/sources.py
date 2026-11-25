@@ -33,7 +33,7 @@ class Manifest:
     kind: str  # aws_cur_legacy | aws_data_exports | azure_cost_export | unknown
     sha256: str
     files: list[str] = field(default_factory=list)  # basenames
-    row_counts: dict[str, int] = field(default_factory=dict)  # basename -> rows
+    row_counts: dict[str, int] = field(default_factory=dict)  # manifest object key -> rows
     billing_period: str | None = None  # YYYY-MM
     declared_rows: int | None = None
     columns: list[str] = field(default_factory=list)
@@ -145,6 +145,12 @@ def _parse_manifest(path: Path) -> Manifest:
     def base(key: str) -> str:
         return key.rstrip("/").rsplit("/", 1)[-1]
 
+    def row_count(record: dict) -> int | None:
+        count = record.get("dataRowCount")
+        if count is not None and (type(count) is not int or count < 0):
+            raise InputError(f"{path.name}: dataRowCount must be a nonnegative integer")
+        return count
+
     # AWS legacy CUR uses reportKeys and AWS Data Exports uses dataFiles.
     if "reportKeys" in doc or "dataFiles" in doc:
         key = "reportKeys" if "reportKeys" in doc else "dataFiles"
@@ -177,8 +183,9 @@ def _parse_manifest(path: Path) -> Manifest:
             keys.append(blob["blobName"])
             name = base(blob["blobName"])
             files.append(name)
-            if isinstance(blob.get("dataRowCount"), int):
-                counts[name] = blob["dataRowCount"]
+            count = row_count(blob)
+            if count is not None:
+                counts[blob["blobName"]] = count
         cfg = doc.get("exportConfig") or {}
         time_period = cfg.get("timePeriod") if isinstance(cfg, dict) else None
         period = time_period.get("from") if isinstance(time_period, dict) else None
@@ -186,7 +193,7 @@ def _parse_manifest(path: Path) -> Manifest:
         return Manifest(
             path, "azure_cost_export", sha, files, counts, keys=keys, identity=ident,
             billing_period=_yyyymm(period),
-            declared_rows=doc.get("dataRowCount") if isinstance(doc.get("dataRowCount"), int) else None,
+            declared_rows=row_count(doc),
         )
     return Manifest(path, "unknown", sha)
 

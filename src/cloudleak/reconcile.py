@@ -18,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from cloudleak.analysis import period_statuses
+from cloudleak.doctor import delivery_checks
 from cloudleak.engine import Workspace
 from cloudleak.errors import InputError
 from cloudleak.findings import Finding
@@ -184,6 +185,9 @@ def _check_scope(rows: list[dict], selectors: dict, e: Expectation) -> list[dict
 
 @money_context
 def reconcile(ws: Workspace, expectations: list[Expectation], tolerance: Decimal = ZERO) -> list[Result]:
+    for check in delivery_checks(ws):
+        if check.status == "FAIL":
+            raise InputError(f"{check.check_id}: {check.message}", hint=check.remediation)
     for source in ws.recognized:
         if not source.header_issues:
             continue
