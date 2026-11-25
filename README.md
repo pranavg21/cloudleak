@@ -53,6 +53,10 @@ Then check it:
 cloudleak --version
 ```
 
+**For users of 0.1.0:** Run `cloudleak doctor PATH` on the delivery before reconciliation and resolve
+any failed completeness checks. In this release, `reconcile` can report a finalized match even when a
+partition listed in the manifest is missing. The fix on `main` makes reconciliation exit 2 in that case.
+
 The PyPI project named `cloudleak` (without `-cli`) is an unrelated package. Releases are published only by
 this repository's release workflow through PyPI trusted publishing, with build provenance you can verify
 (see [SECURITY.md](SECURITY.md#supply-chain)). A container image is published as
@@ -114,8 +118,10 @@ doctor only). Repeat `-o` for several.
 
 ## Tested export shapes
 
-These checks use synthetic charges and independent invoice totals; each row is exercised in CI by
-[`tests/test_export_shapes.py`](tests/test_export_shapes.py). Use the table to choose the applicable comparison.
+The native-export CI cases compare synthetic charges with independent totals in
+[`test_export_shapes.py`](tests/test_export_shapes.py) and [`test_native_providers.py`](tests/test_native_providers.py).
+The full FOCUS headers and vendor projections were exercised in a separate release review. CI checks
+version markers, invoice scope and precision in [`test_invoice_scope_precision.py`](tests/test_invoice_scope_precision.py).
 
 | Export | Tested comparison | Outside this evidence |
 | --- | --- | --- |
