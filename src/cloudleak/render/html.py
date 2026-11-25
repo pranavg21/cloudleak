@@ -12,7 +12,7 @@ from html import escape
 
 from cloudleak.analysis import totals_finality
 from cloudleak.money import display, money_context
-from cloudleak.render.formats import owner_label
+from cloudleak.render.formats import invoice_rows, owner_label
 from cloudleak.report import CAN_CANNOT, ISSUES_URL
 
 CSS = """
@@ -193,6 +193,11 @@ def render(report: dict) -> str:
         head.append(f'<div class="banner bad">TOTALS MAY BE WRONG: {len(fails)} data-quality check(s) failed. '
                     f"Fix the inputs before relying on any number in this report.<ul>{items}</ul></div>")
     sections.append("".join(head))
+    if "reconciliation" in r:
+        for row in invoice_rows(r):
+            sections.append("<h2>Invoice comparison</h2>" + table(
+                ["Field", "Value"], [[e(key), e(value)] for key, value in row.items() if value is not None]))
+
 
     # KPIs
     kpis = []

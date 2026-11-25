@@ -54,7 +54,7 @@ def _render(kind: str, report: dict) -> str:
     if kind == "md":
         return formats.markdown(report)
     if kind == "csv":
-        return formats.findings_csv(report)
+        return formats.reconciliation_csv(report) if "reconciliation" in report else formats.findings_csv(report)
     if kind == "sarif":
         return json.dumps(formats.sarif(report), indent=2, sort_keys=True) + "\n"
     if kind == "junit":
@@ -473,6 +473,8 @@ def main(argv: list[str] | None = None) -> int:
         if exc.hint:
             print(f"  hint: {exc.hint}", file=sys.stderr)
         return exc.exit_code
+    except BrokenPipeError:
+        return EXIT_OK
     except OSError as exc:
         where = f" {exc.filename}" if getattr(exc, "filename", None) else ""
         print(f"cloudleak: error: cannot access{where}: {exc.strerror or exc}", file=sys.stderr)
@@ -481,8 +483,6 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_INPUT
     except KeyboardInterrupt:
         return 130
-    except BrokenPipeError:
-        return EXIT_OK
     except Exception as exc:
         import duckdb
         if isinstance(exc, (duckdb.OutOfMemoryException, duckdb.IOException)):

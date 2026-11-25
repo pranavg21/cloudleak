@@ -3,7 +3,15 @@
 All notable changes are documented here. This project uses semantic versioning; the
 `cloudleak.finding.v1` and `cloudleak.report.v1` schemas change version on any breaking change.
 
-## 0.1.0 (unreleased)
+## Unreleased
+
+- Invoice comparison stops if the supplied delivery contains duplicate file content on the same cost basis,
+  missing manifest partitions, stale deliveries, or a discrepancy in the declared row counts.
+- Reconciliation CSV, Markdown and HTML include each invoice comparison and its exact signed residual,
+  including amounts accepted within tolerance. Reconciliation CSV now contains comparison rows;
+  audit CSV continues to contain findings.
+
+## 0.1.0
 
 CloudLeak is rebuilt as an offline command-line tool. The earlier Next.js upload UI and FastAPI job
 server are retired (preserved in history at `489fbff`): a local tool should not need a web server, API

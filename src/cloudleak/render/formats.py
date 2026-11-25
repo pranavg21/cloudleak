@@ -95,6 +95,23 @@ def audit_text(report: dict) -> str:
 
 
 # -------------------------------------------------------------- markdown
+def invoice_rows(report: dict):
+    """One report row per comparison, including equal and provisional results."""
+    for result in report.get("reconciliation", []):
+        yield {**result["invoice"], **{key: result[key] for key in (
+            "export_total", "difference", "arithmetic_comparison", "tolerance", "status", "period_finality", "rows")}}
+
+
+def reconciliation_csv(report: dict) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    for index, row in enumerate(invoice_rows(report)):
+        if index == 0:
+            writer.writerow(row.keys())
+        writer.writerow([safe_cell(value) for value in row.values()])
+    return buf.getvalue()
+
+
 def markdown(report: dict) -> str:
     out = ["# CloudLeak audit brief", "",
            f"Run `{report['run']['report_run_id']}` · CloudLeak {report['tool']['version']} · processed offline", ""]
@@ -104,6 +121,10 @@ def markdown(report: dict) -> str:
     if pre:
         out += ["> **Preliminary estimate:** " + ", ".join(f"{p['provider']} {p['billing_period']}" for p in pre)
                 + " not finalized.", ""]
+    for row in invoice_rows(report):
+        out.extend(["## Invoice comparison", "", "| Field | Value |", "|---|---|"])
+        out.extend(f"| {key} | {md(value)} |" for key, value in row.items() if value is not None)
+        out.append("")
     out += ["## Totals", "", "| Provider | Period | Basis | Finality | Total |", "|---|---|---|---|---:|"]
     fin = totals_finality(report["periods"])
     for t in report["totals"]:
@@ -134,7 +155,7 @@ def markdown(report: dict) -> str:
 
 
 def md(text: object) -> str:
-    return str(text or "").replace("|", "\\|").replace("\n", " ").replace("<", "&lt;")
+    return str("" if text is None else text).replace("|", "\\|").replace("\n", " ").replace("<", "&lt;")
 
 
 # ------------------------------------------------------------------- csv

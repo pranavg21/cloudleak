@@ -12,7 +12,7 @@ the catalog can be documented. Status meanings:
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -148,6 +148,27 @@ def _src_name(s: LoadedSource) -> str:
     return s.file.display_name
 
 
+def delivery_checks(ws: Workspace) -> list[CheckResult]:
+    """Check delivery integrity without running unrelated analytical checks."""
+    results: list[CheckResult] = []
+    add = results.append
+    by_sha: dict[tuple[str, str | None], list[str]] = defaultdict(list)
+    for s in ws.sources:
+        by_sha[(s.file.sha256, s.mapping.cost_basis if s.mapping else None)].append(_src_name(s))
+    dupes = {k: v for k, v in by_sha.items() if len(v) > 1}
+    if dupes:
+        for (sha, _basis), names in dupes.items():
+            add(CheckResult("CL-ING-002", "FAIL", f"Identical content supplied {len(names)} times: {', '.join(names)}.",
+                            remediation="Remove the duplicate copies; every row would otherwise be counted twice.",
+                            metrics={"sha256": sha}))
+    else:
+        add(CheckResult("CL-ING-002", "PASS", f"{len(ws.sources)} distinct files."))
+
+    _manifest_checks(ws, add)
+
+    return results
+
+
 def run_doctor(ws: Workspace) -> DoctorReport:
     out: list[CheckResult] = []
     add = out.append
@@ -177,19 +198,7 @@ def run_doctor(ws: Workspace) -> DoctorReport:
     for name, reason in ws.discovery.skipped:
         add(CheckResult("CL-ING-001", "INFO", f"Skipped: {reason}.", name))
 
-    by_sha: dict[str, list[str]] = defaultdict(list)
-    for s in ws.sources:
-        by_sha[s.file.sha256].append(_src_name(s))
-    dupes = {k: v for k, v in by_sha.items() if len(v) > 1}
-    if dupes:
-        for sha, names in dupes.items():
-            add(CheckResult("CL-ING-002", "FAIL", f"Identical content supplied {len(names)} times: {', '.join(names)}.",
-                            remediation="Remove the duplicate copies; every row would otherwise be counted twice.",
-                            metrics={"sha256": sha}))
-    else:
-        add(CheckResult("CL-ING-002", "PASS", f"{len(ws.sources)} distinct files."))
-
-    _manifest_checks(ws, add)
+    out.extend(delivery_checks(ws))
 
     bad = ws.rows("""SELECT source_id, count(*) AS n, min(source_row) AS first_row, any_value(cost_raw) AS example
                      FROM items WHERE cost_parse_error GROUP BY 1 ORDER BY 1""")
@@ -521,17 +530,11 @@ def run_doctor(ws: Workspace) -> DoctorReport:
     return DoctorReport(out)
 
 
-def _tail2(text: str) -> str:
-    parts = [p for p in text.replace("\\", "/").split("/") if p]
-    return "/".join(parts[-2:])
-
-
 def _manifest_checks(ws: Workspace, add) -> None:
     """Completeness and staleness of manifest-described deliveries.
 
-    A provider manifest names the files of exactly one delivery. Files are matched on
-    their last two path components (``<assembly or run id>/<file>``), so a file from an
-    older assembly or export run with the same file name is *not* mistaken for a listed one.
+    Match each object key to one relative path inside the manifest's delivery.
+    A flattened download can satisfy a key only when its basename is unique.
     """
     manifests = ws.discovery.manifests
     if not manifests:
@@ -541,28 +544,36 @@ def _manifest_checks(ws: Workspace, add) -> None:
         add(CheckResult("CL-ING-004", "SKIP", "No manifest row counts to compare."))
         return
     sources = list(ws.sources)
-    by_tail = {f"{s.file.path.parent.name}/{s.file.path.name}": s for s in sources}
-
-    def owned(m) -> list:
-        """Sources this manifest lists."""
-        tails = {_tail2(k) for k in m.keys}
-        out = [s for t, s in by_tail.items() if t in tails]
-        flat = [s for s in by_base_items(m) if s not in out]
-        return out + flat
-
-    def by_base_items(m):
-        names = set(m.files)
-        return [s for s in sources if s.file.path.parent == m.path.parent and s.file.path.name in names]
-
     claimed: dict[int, list] = defaultdict(list)
     for m in manifests:
-        listed = owned(m)
+        scope = m.path.name
+        local = defaultdict(list)
+        for s in sources:
+            if m.path.parent in s.file.path.parents:
+                local[s.file.path.name].append(s)
+        matched = {}
+        missing = []
+        basename_counts = Counter(m.files)
+        for key in m.keys:
+            name = key.rsplit("/", 1)[-1]
+            matches = []
+            for s in local[name]:
+                rel = s.file.path.relative_to(m.path.parent).as_posix()
+                if rel == name:
+                    # Allow a flattened download only for a unique basename.
+                    if basename_counts[name] == 1:
+                        matches.append(s)
+                elif key == rel or key.endswith("/" + rel):
+                    matches.append(s)
+            if len(matches) == 1 and key not in matched:
+                matched[key] = matches[0]
+            else:
+                missing.append(key)
+        listed = list(matched.values())
         for s in listed:
             claimed[s.file.source_id].append(m)
-        scope = m.path.name
-        found_tails = {f"{s.file.path.parent.name}/{s.file.path.name}" for s in listed}
-        found_bases = {s.file.path.name for s in listed}
-        missing = [k for k in m.keys if _tail2(k) not in found_tails and k.rsplit("/", 1)[-1] not in found_bases]
+        if len({s.file.source_id for s in listed}) != len(listed):
+            add(CheckResult("CL-ING-003", "FAIL", "Several manifest entries resolve to one data file.", scope))
         if missing:
             add(CheckResult("CL-ING-003", "FAIL", f"{len(missing)} file(s) listed in the manifest are missing: "
                             f"{', '.join(k.rsplit('/', 1)[-1] for k in missing[:5])}.", scope,
@@ -570,14 +581,16 @@ def _manifest_checks(ws: Workspace, add) -> None:
                             {"missing": [k.rsplit("/", 1)[-1] for k in missing]}))
         elif m.keys:
             add(CheckResult("CL-ING-003", "PASS", f"All {len(m.keys)} listed file(s) present.", scope))
-        if m.row_counts:
-            mism = [(s.file.path.name, m.row_counts[s.file.path.name], s.rows) for s in listed
-                    if s.file.path.name in m.row_counts and m.row_counts[s.file.path.name] != s.rows]
-            if mism:
-                add(CheckResult("CL-ING-004", "FAIL", "; ".join(f"{n}: manifest {c:,} rows, read {r:,}"
-                                                                for n, c, r in mism[:5]), scope,
-                                "The file is truncated or from a different run than the manifest."))
-            else:
+        if m.row_counts or m.declared_rows is not None:
+            mismatches = [f"{key}: manifest {m.row_counts[key]:,} rows, read {s.rows:,}"
+                          for key, s in matched.items() if key in m.row_counts and m.row_counts[key] != s.rows]
+            total = sum(s.rows for s in listed)
+            if m.declared_rows is not None and m.declared_rows != total:
+                mismatches.append(f"delivery: manifest {m.declared_rows:,} rows, read {total:,}")
+            if mismatches:
+                add(CheckResult("CL-ING-004", "FAIL", "; ".join(mismatches[:5]), scope,
+                                "Check the delivery for a truncated or missing partition."))
+            elif not missing:
                 add(CheckResult("CL-ING-004", "PASS", "Row counts match the manifest.", scope))
 
     # Files inside a manifest's delivery folder that no manifest lists: older assemblies / runs.

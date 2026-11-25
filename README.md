@@ -112,6 +112,10 @@ These checks use synthetic charges and independent invoice totals; each row is e
 | Google Cloud Billing | Flattened standard/detailed CSV and nested Parquet, including repeated credits and late usage assigned by invoice month | Full 2026 CUD migration and fee-offset handling |
 | FOCUS Cost and Usage | Synthetic normative headers for 1.0–1.4; AWS 1.2 and selected Microsoft 1.0/1.2 export projections | Vendor-wide conformance and complete GCP/OCI delivery coverage |
 
+When a provider manifest is available, include it with the delivery. Reconciliation checks its listed files
+and declared row counts before comparing amounts. Without a manifest the CLI cannot verify that all
+partitions arrived. Reconciliation CSV contains one row per requested invoice comparison.
+
 A zero reconciliation exit code means the compared amounts agree within tolerance. Inspect the signed difference, status and period finality before treating that result as an invoice close.
 
 Something not recognized? Open a [schema quirk issue](https://github.com/pranavg21/cloudleak/issues/new?template=schema-quirk.yml)
