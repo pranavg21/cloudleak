@@ -11,7 +11,7 @@ All notable changes are documented here. This project uses semantic versioning; 
   including amounts accepted within tolerance. Reconciliation CSV now contains comparison rows;
   audit CSV continues to contain findings.
 
-## 0.1.0
+## 0.1.0 (2026-11-23)
 
 CloudLeak is rebuilt as an offline command-line tool. The earlier Next.js upload UI and FastAPI job
 server are retired (preserved in history at `489fbff`): a local tool should not need a web server, API
