@@ -89,7 +89,7 @@ jobs:
           test -s brief.html
       - name: Audit runtime dependencies for known vulnerabilities
         run: /tmp/w/bin/python -m pip freeze --exclude-editable > /tmp/req.txt && pip-audit -r /tmp/req.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
